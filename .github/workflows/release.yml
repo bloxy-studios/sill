@@ -83,29 +83,39 @@ jobs:
           if [ -z "${RID}" ]; then
             echo "No release found for tag ${TAG}" >&2; exit 1
           fi
-          # Manifest replacement is ordered so a complete checksum manifest
-          # exists in the release at EVERY point, even across failed reruns:
-          #   1. clean any leftover temp manifest (never authoritative)
-          #   2. download all artifacts (the fallible bulk work)
-          #   3. generate the new manifest locally
-          #   4. upload it under a TEMP name (old manifest still in place)
-          #   5. delete the stale manifest
-          #   6. rename temp -> SHA256SUMS.txt (metadata-only PATCH)
-          # A failure between 5 and 6 leaves the complete new manifest
-          # present under the temp name; a rerun regenerates and heals.
+          # Invariant: once any complete checksum manifest exists in the
+          # release (canonical SHA256SUMS.txt or temp SHA256SUMS.txt.new),
+          # at least one remains present at EVERY point of this job, across
+          # any failure or rerun interleaving:
+          #   1. heal-first: temp exists w/o canonical -> rename temp into
+          #      place BEFORE any fallible work (metadata-only PATCH)
+          #   2. redundant temp (canonical also present) -> delete temp only
+          #      (canonical stays); needed so step 5's upload can't 422
+          #   3. download all artifacts (the fallible bulk work)
+          #   4. generate the new manifest locally
+          #   5. upload it under the TEMP name (old manifest untouched)
+          #   6. delete the stale canonical
+          #   7. rename temp -> SHA256SUMS.txt
+          # Failure between 6 and 7 leaves the complete new manifest under
+          # the temp name; the next rerun's step 1 restores it before doing
+          # anything that can fail.
           TEMP_NAME="SHA256SUMS.txt.new"
           mkdir -p assets && cd assets
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
             --paginate --jq '.[] | "\(.id)\t\(.name)"' > ../asset-list.tsv
-          STALE_MANIFEST_ID=""
+          STALE_MANIFEST_ID=$(awk -F'\t' '$2=="SHA256SUMS.txt"{print $1; exit}' ../asset-list.tsv || true)
+          LEFTOVER_TEMP_ID=$(awk -F'\t' -v t="${TEMP_NAME}" '$2==t{print $1; exit}' ../asset-list.tsv || true)
+          if [ -n "${LEFTOVER_TEMP_ID}" ] && [ -z "${STALE_MANIFEST_ID}" ]; then
+            echo "healing: renaming leftover ${TEMP_NAME} (asset ${LEFTOVER_TEMP_ID}) to SHA256SUMS.txt"
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${LEFTOVER_TEMP_ID}" \
+              -f name="SHA256SUMS.txt" > /dev/null
+            STALE_MANIFEST_ID="${LEFTOVER_TEMP_ID}"
+          elif [ -n "${LEFTOVER_TEMP_ID}" ]; then
+            echo "deleting redundant ${TEMP_NAME} (asset ${LEFTOVER_TEMP_ID}); canonical manifest remains"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${LEFTOVER_TEMP_ID}"
+          fi
           while IFS=$'\t' read -r AID NAME; do
-            if [ "${NAME}" = "${TEMP_NAME}" ]; then
-              echo "cleaning leftover ${TEMP_NAME} (asset ${AID})"
-              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${AID}"
-              continue
-            fi
-            if [ "${NAME}" = "SHA256SUMS.txt" ]; then
-              STALE_MANIFEST_ID="${AID}"
+            if [ "${NAME}" = "${TEMP_NAME}" ] || [ "${NAME}" = "SHA256SUMS.txt" ]; then
               continue
             fi
             echo "downloading ${NAME}"
