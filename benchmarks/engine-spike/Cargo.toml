@@ -1,0 +1,16 @@
+# Standalone spike harness for ADR-0006 (terminal engine selection).
+# Deliberately EXCLUDED from the workspace: it pulls competing engines for
+# measurement only and must never enter the app's dependency graph.
+[package]
+name = "engine-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+alacritty_terminal = "0.26"
+vt100 = "0.16"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
