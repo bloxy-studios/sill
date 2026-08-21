@@ -11,6 +11,15 @@ on:
 permissions:
   contents: read
 
+# Serialize release runs per tag: two runs for the same ref never execute
+# concurrently (the newer one queues). This protects the whole pipeline —
+# tauri-action asset uploads AND the checksum-manifest replacement — from
+# concurrent-run interleavings. cancel-in-progress stays false so a run
+# that may be mid-upload is never killed.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: build (${{ matrix.platform }}${{ matrix.args && ', ' }}${{ matrix.args }})
