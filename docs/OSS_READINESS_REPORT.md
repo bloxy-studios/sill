@@ -43,7 +43,8 @@ announce loudly when there's a build to try.
 2. Bus factor 1
 3. No release history (pipeline unexercised)
 4. Contested category (Warp/cmux) + name collisions (crates.io/npm `sill`
-   taken; see audit §4.2) — positioning and naming risks to keep eyes on
+   taken; see audit §4.2) — positioning risk stays open; naming policy is
+   now fixed ([ADR-0008](decisions/0008-naming-and-crate-policy.md))
 5. Unsigned artifacts once releases start (funding-gated)
 
 ## Top 10 actions, in order
@@ -63,8 +64,11 @@ announce loudly when there's a build to try.
    check GitHub Sponsors region eligibility (gates the funding plan) and, if
    German tax residency applies, note the Prototype Fund window
    (2026-10-01 → 11-30) — see [oss/PROGRAM_MATRIX.md](oss/PROGRAM_MATRIX.md)
-6. Decide the crates.io naming stance (collision documented in audit §4.2)
-   before any crate publication or wide announcement makes renaming costly
+6. Naming stance: **decided 2026-08-21**
+   ([ADR-0008](decisions/0008-naming-and-crate-policy.md) — name kept; bare
+   `sill`/`sill-*` never published; `sillterm-*` for branded internals).
+   Remaining maintainer actions from it: acquire `sill.sh` (free at decision
+   time — time-sensitive), run the trademark register check
 7. Cut `v0.1.0-alpha.1` once Phase 1 is daily-driveable — exercising the
    release pipeline is itself a milestone; record it in evidence/
 8. Take monthly metrics snapshots (founding baseline exists: 2026-08);

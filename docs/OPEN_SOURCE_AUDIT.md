@@ -49,10 +49,14 @@ repository is calibrated to that fact.
    registry); npm `sill` taken (dormant); `sill.social` is an active,
    unrelated product holding search mindshare; "SILL" is a French-government
    FOSS-catalog acronym. Homebrew formula/cask names are free; no terminal
-   named sill found; trademark registers not queried. **Implication:** the
-   app name is usable, but publishing crates under `sill` is blocked and
-   search discoverability is contested — a rename decision, if ever, gets
-   cheaper the earlier it's made. Recorded, not decided.
+   named sill found; trademark registers not queried.
+   **Disposition — decided 2026-08-21:** the name stays. Bare `sill` and
+   `sill-*` are never published to any registry; ecosystem crates get
+   standalone neutral names; branded internals use `sillterm-*`; canonical
+   domain designated `sill.sh` (free at decision time). Policy, rationale,
+   and binding rename-revisit triggers (before `v0.1.0-alpha.1` only):
+   [ADR-0008](decisions/0008-naming-and-crate-policy.md). Still open inside
+   that decision: acquire `sill.sh`; trademark register check.
 3. **Category competition:** Warp (AGPL, 64k★) and cmux (GPL, 26k★) occupy
    "agent terminal" mindshare. Differentiation position recorded in
    [COMPETITIVE_LANDSCAPE.md](COMPETITIVE_LANDSCAPE.md); it is a bet, not a

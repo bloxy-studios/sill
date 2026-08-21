@@ -19,6 +19,7 @@ Records are only created for real decisions. Numbering is chronological.
 | [0005](0005-release-process.md)         | Tag-driven draft releases via CI                      | Accepted        |
 | [0006](0006-terminal-engine.md)         | Terminal emulation engine selection                   | Proposed (open) |
 | [0007](0007-agent-integration-model.md) | Provider-neutral agent integration model              | Proposed (open) |
+| [0008](0008-naming-and-crate-policy.md) | Product naming and crate-publishing policy            | Accepted        |
 
 To add one: copy the section structure from any accepted ADR, number it next,
 and open a PR. Large proposals should start life as an [RFC](../rfcs/) and
