@@ -83,14 +83,27 @@ jobs:
           if [ -z "${RID}" ]; then
             echo "No release found for tag ${TAG}" >&2; exit 1
           fi
+          # Manifest replacement is ordered so a complete checksum manifest
+          # exists in the release at EVERY point, even across failed reruns:
+          #   1. clean any leftover temp manifest (never authoritative)
+          #   2. download all artifacts (the fallible bulk work)
+          #   3. generate the new manifest locally
+          #   4. upload it under a TEMP name (old manifest still in place)
+          #   5. delete the stale manifest
+          #   6. rename temp -> SHA256SUMS.txt (metadata-only PATCH)
+          # A failure between 5 and 6 leaves the complete new manifest
+          # present under the temp name; a rerun regenerates and heals.
+          TEMP_NAME="SHA256SUMS.txt.new"
           mkdir -p assets && cd assets
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
             --paginate --jq '.[] | "\(.id)\t\(.name)"' > ../asset-list.tsv
-          # All fallible work happens BEFORE any stale manifest is touched:
-          # a failed rerun must never leave the draft without its existing
-          # SHA256SUMS.txt. The stale manifest is only noted here.
           STALE_MANIFEST_ID=""
           while IFS=$'\t' read -r AID NAME; do
+            if [ "${NAME}" = "${TEMP_NAME}" ]; then
+              echo "cleaning leftover ${TEMP_NAME} (asset ${AID})"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${AID}"
+              continue
+            fi
             if [ "${NAME}" = "SHA256SUMS.txt" ]; then
               STALE_MANIFEST_ID="${AID}"
               continue
@@ -104,19 +117,19 @@ jobs:
           done < ../asset-list.tsv
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          # Replace the manifest only now that its successor exists locally.
-          # GitHub rejects duplicate asset names, so a stale one is deleted
-          # first; the remaining delete->upload window is a single API call,
-          # and the human draft-verification checklist (docs/RELEASING.md)
-          # requires the checksums file to be present before publishing.
+          NEW_ID=$(curl -sSf -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @SHA256SUMS.txt \
+            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=${TEMP_NAME}" \
+            | jq -r '.id')
+          if [ -z "${NEW_ID}" ] || [ "${NEW_ID}" = "null" ]; then
+            echo "temp manifest upload did not return an asset id" >&2; exit 1
+          fi
           if [ -n "${STALE_MANIFEST_ID}" ]; then
             echo "deleting stale SHA256SUMS.txt (asset ${STALE_MANIFEST_ID})"
             gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${STALE_MANIFEST_ID}"
           fi
-          curl -sSf -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Content-Type: text/plain" \
-            --data-binary @SHA256SUMS.txt \
-            "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RID}/assets?name=SHA256SUMS.txt" \
-            > /dev/null
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/assets/${NEW_ID}" \
+            -f name="SHA256SUMS.txt" > /dev/null
           echo "SHA256SUMS.txt attached to draft release ${TAG}"
