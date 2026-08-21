@@ -87,7 +87,13 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/releases/${RID}/assets" \
             --paginate --jq '.[] | "\(.id)\t\(.name)"' > ../asset-list.tsv
           while IFS=$'\t' read -r AID NAME; do
-            [ "${NAME}" = "SHA256SUMS.txt" ] && continue
+            if [ "${NAME}" = "SHA256SUMS.txt" ]; then
+              # Rerun safety: GitHub rejects duplicate asset names (422),
+              # so delete the stale checksums file before re-uploading.
+              echo "deleting existing SHA256SUMS.txt (asset ${AID}) for rerun"
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${AID}"
+              continue
+            fi
             echo "downloading ${NAME}"
             curl -sSfL \
               -H "Authorization: Bearer ${GH_TOKEN}" \

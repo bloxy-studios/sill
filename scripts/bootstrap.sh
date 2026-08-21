@@ -22,7 +22,8 @@ if command -v bun >/dev/null 2>&1; then
   esac
 else
   miss "Bun not found"
-  note "Install: curl -fsSL https://bun.sh/install | bash"
+  note "Install via the official instructions: https://bun.sh/docs/installation"
+  note "(package managers like Homebrew/Scoop are available there too)"
 fi
 
 # Rust via rustup (rust-toolchain.toml pins the version)

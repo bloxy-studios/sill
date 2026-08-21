@@ -40,7 +40,9 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
 Other distros: see the [Tauri prerequisites](https://tauri.app/start/prerequisites/).
 
 **Windows:** Microsoft C++ Build Tools and WebView2 (usually preinstalled on
-Windows 11); see the Tauri prerequisites page.
+Windows 11); see the Tauri prerequisites page. Also **Git for Windows** —
+`bun run setup` and `bun run check` are Bash scripts, so run them from
+**Git Bash** (everything else, like `bun tauri dev`, works from any shell).
 
 ## Setup
 

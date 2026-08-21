@@ -10,11 +10,16 @@ ever have to learn.
 
 ## 1. Prerequisites (one-time)
 
-- [Bun](https://bun.sh) ≥ 1.4 — `curl -fsSL https://bun.sh/install | bash`
+- [Bun](https://bun.sh) ≥ 1.4 — install via the
+  [official instructions](https://bun.sh/docs/installation) (package-manager
+  routes like Homebrew/Scoop are listed there; prefer those if you'd rather
+  not pipe an installer script)
 - [rustup](https://rustup.rs) — installs the Rust version pinned by
   `rust-toolchain.toml` automatically on first build
 - Platform libraries — macOS: `xcode-select --install`; Linux/Windows: see
   [CONTRIBUTING.md → Prerequisites](../CONTRIBUTING.md#prerequisites)
+- Windows only: run `bun run setup` / `bun run check` from **Git Bash**
+  (ships with Git for Windows) — they are Bash scripts
 
 ## 2. Clone, verify, run (~5 min + first compile)
 

@@ -28,6 +28,9 @@ Settings that live in the GitHub UI (not in this repo) and should be kept true:
       CI status checks (`CI / frontend`, `CI / rust`), block force pushes.
 - [ ] **Private vulnerability reporting**: enabled (Settings → Security).
 - [ ] **Secret scanning + push protection**: enabled.
+- [ ] **Dependency graph**: enabled (Settings → Security) — prerequisite for
+      Dependabot alerts and the CI dependency-review check, which fails
+      until this is on.
 - [ ] **Dependabot alerts + security updates**: enabled.
 - [ ] **Discussions**: enabled, categories per [docs/COMMUNITY.md](docs/COMMUNITY.md).
 - [ ] **Repository metadata**: description, topics, and social preview set
