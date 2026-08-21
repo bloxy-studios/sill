@@ -1,0 +1,62 @@
+name: Bug Report
+description: Something behaves incorrectly
+labels: ["type:bug", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security issues do not belong here** — use
+        [private vulnerability reporting](https://github.com/bloxy-studios/sill/security/advisories/new) instead.
+        Before posting, please make sure logs/screenshots contain no secrets (tokens, keys, private paths).
+  - type: input
+    id: version
+    attributes:
+      label: Sill version or commit
+      placeholder: "v0.1.0 / main @ abc1234"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 15.5 (arm64) / Ubuntu 24.04 (x86_64) / Windows 11 (x86_64)"
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell and relevant terminal configuration
+      placeholder: "zsh 5.9, default config; font JetBrains Mono"
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproduction is worth more than a perfect description.
+      placeholder: |
+        1. Launch Sill
+        2. Run `…`
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Redact anything sensitive before pasting.
+  - type: input
+    id: toolchain
+    attributes:
+      label: Rust / Bun versions (only if building from source)
+      placeholder: "rustc 1.98.0, bun 1.4.0"

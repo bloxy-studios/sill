@@ -1,0 +1,14 @@
+# Code owners are automatically requested for review on matching PRs.
+# Sill currently has one maintainer, so ownership is not yet split by area.
+# See MAINTAINERS.md and GOVERNANCE.md for how area ownership will be added
+# as reviewers/maintainers join.
+
+* @bloxy-studios
+
+# Future area ownership (uncomment and assign as real reviewers exist):
+# /src/                    @bloxy-studios <frontend-reviewer>
+# /src-tauri/              @bloxy-studios <rust-reviewer>
+# /docs/                   @bloxy-studios <docs-reviewer>
+# /.github/                @bloxy-studios
+# /SECURITY.md             @bloxy-studios
+# /deny.toml               @bloxy-studios

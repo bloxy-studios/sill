@@ -1,0 +1,41 @@
+name: Terminal Compatibility Issue
+description: A program renders or behaves incorrectly inside Sill
+labels: ["type:bug", "area:term", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility reports are gold — thank you. The reference behavior is
+        usually xterm's; telling us how another terminal handles the same
+        program helps a lot.
+  - type: input
+    id: program
+    attributes:
+      label: Program and version
+      placeholder: "vim 9.1 / tmux 3.5 / htop 3.3 / claude-code 1.x"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sill version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What renders/behaves incorrectly
+      description: Screenshots welcome. If you know the escape sequences involved, include them.
+    validations:
+      required: true
+  - type: input
+    id: elsewhere
+    attributes:
+      label: Behavior in other terminals
+      placeholder: "Correct in xterm and kitty; same bug in Alacritty"

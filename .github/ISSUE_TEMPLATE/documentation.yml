@@ -1,0 +1,26 @@
+name: Documentation Issue
+description: Wrong, stale, missing, or confusing documentation
+labels: ["type:docs", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Docs fixes are excellent first contributions — if you'd rather PR the
+        fix directly, see [CONTRIBUTING.md](https://github.com/bloxy-studios/sill/blob/main/CONTRIBUTING.md).
+  - type: input
+    id: location
+    attributes:
+      label: Which document / section
+      placeholder: "docs/CONTRIBUTOR_QUICKSTART.md — step 2"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong or missing
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix (optional)

@@ -1,0 +1,38 @@
+name: Feature Request
+description: Propose new functionality
+labels: ["type:feature", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](https://github.com/bloxy-studios/sill/blob/main/ROADMAP.md) first — your idea may already have a phase.
+        Large/architectural ideas should start as a [Discussion](https://github.com/bloxy-studios/sill/discussions) or [RFC](https://github.com/bloxy-studios/sill/blob/main/docs/rfcs/README.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What hurts today? Describe the problem before any solution.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do nothing" and existing workarounds.
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Use case — who benefits, and how often?
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation / compatibility notes (optional)
+      description: Sketches welcome; cross-platform or compatibility concerns especially.
