@@ -34,13 +34,14 @@ A window opens. Frontend edits hot-reload; Rust edits trigger a rebuild.
 
 ## 3. Orient yourself (~10 min)
 
-| Path                                  | What it is                                                                                                                                     |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/App.tsx`                         | Frontend entry UI (placeholder). Calls Rust via `invoke("greet", …)` — that round-trip **is** Tauri IPC, the pattern everything real will use. |
-| `src-tauri/src/lib.rs`                | Rust side: `#[tauri::command] fn greet` + app builder. New commands get registered here.                                                       |
-| `src-tauri/capabilities/default.json` | What the webview is allowed to do. Deliberately minimal.                                                                                       |
-| `docs/ARCHITECTURE.md`                | Current vs target architecture — read the diagram.                                                                                             |
-| `ROADMAP.md`                          | What's being built and in what order.                                                                                                          |
+| Path                                  | What it is                                                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `crates/sill-core/`                   | The terminal core: PTY sessions, emulation engine, snapshots, events. Builds and tests headless — start here. |
+| `src/App.tsx` + `src/lib/`            | Canvas grid renderer, keyboard encoding, session view. Draws Rust snapshots imperatively.                     |
+| `src-tauri/src/lib.rs`                | Typed IPC commands over sill-core + snapshot/event pump threads.                                              |
+| `src-tauri/capabilities/default.json` | What the webview is allowed to do. Deliberately minimal.                                                      |
+| `docs/ARCHITECTURE.md`                | Current vs target architecture — read the diagram.                                                            |
+| `ROADMAP.md`                          | What's being built and in what order.                                                                         |
 
 The one architectural rule: **OS things (PTY, processes, files) happen in
 Rust; the frontend renders state and sends input as data.** The IPC boundary
@@ -48,9 +49,10 @@ is a security boundary.
 
 ## 4. Make a change (~5 min)
 
-Try the full loop with something trivial — e.g. change the greeting format in
-`src-tauri/src/lib.rs`, watch the rebuild, see it in the UI. Update the
-matching unit test at the bottom of `lib.rs` (`cargo test` in `src-tauri/`).
+Try the full loop with something visible — e.g. tweak the default theme in
+`src/lib/renderer.ts` (hot-reloads), or adjust a snapshot detail in
+`crates/sill-core/src/snapshot.rs` and run its tests
+(`cargo test -p sill-core`) to see the contract enforced.
 
 ## 5. Check like CI does (~3 min)
 

@@ -3288,6 +3288,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sill-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",

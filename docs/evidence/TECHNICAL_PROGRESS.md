@@ -10,5 +10,12 @@ link. Roadmap intentions do not appear here — that is what
 
 ## Entries
 
-_None yet. Sill is pre-alpha; the first entries will come from Roadmap
-Phase 1 (terminal foundation) work._
+- **2026-08-21 — Terminal core landed** (Phase 2 of the build plan, via the
+  feat/terminal-foundation PR): `crates/sill-core` — PTY sessions,
+  alacritty_terminal-backed emulation, typed events, capped scrollback;
+  19 headless tests against real shells. Engine chosen via measured spike
+  (throughput + RSS, two engines, four corpora):
+  [ADR-0006](../decisions/0006-terminal-engine.md),
+  [benchmark results](../../benchmarks/engine-spike/RESULTS.md). PUBLIC.
+  Caveat recorded honestly: GUI rendering not yet verified on real display
+  hardware at entry time.

@@ -60,12 +60,13 @@ system library, install it and re-run.
 ## Repository layout
 
 ```
-src/          React + TypeScript frontend (webview)
-src-tauri/    Rust core: application setup, commands, (future) PTY & sessions
-  src/lib.rs  Tauri builder + command handlers
-docs/         Architecture, design, policies
-.github/      CI, issue forms, templates
-scripts/      Developer tooling
+crates/sill-core/  Terminal core: PTY, emulation, sessions (headless, tested)
+src-tauri/         Tauri shell: typed IPC commands + snapshot/event pumps
+src/               React + TypeScript frontend; src/lib/ = renderer, keys
+docs/              Architecture, design, policies
+benchmarks/        Engine spike harness + recorded results
+.github/           CI, issue forms, templates
+scripts/           Developer tooling
 ```
 
 Where code belongs: **anything that touches the OS (PTY, processes, files,
