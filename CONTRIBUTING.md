@@ -75,16 +75,16 @@ them is the security boundary — read
 
 ## Development loop
 
-| Command                                                  | What it does                                                       |
-| -------------------------------------------------------- | ------------------------------------------------------------------ |
-| `bun tauri dev`                                          | run the app (hot-reloads frontend, rebuilds Rust on change)        |
-| `bun run check`                                          | everything CI runs: typecheck, lint, format, Rust fmt/clippy/tests |
-| `bun run typecheck`                                      | TypeScript, no emit                                                |
-| `bun run lint`                                           | ESLint                                                             |
-| `bun run format`                                         | Prettier (write) / `format:check` to verify                        |
-| `cargo fmt && cargo clippy --all-targets -- -D warnings` | in `src-tauri/`                                                    |
-| `cargo test`                                             | in `src-tauri/`                                                    |
-| `bun tauri build`                                        | full production build (slow; rarely needed locally)                |
+| Command                                                  | What it does                                                                       |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `bun tauri dev`                                          | run the app (hot-reloads frontend, rebuilds Rust on change)                        |
+| `bun run check`                                          | everything CI runs: typecheck, lint, format, frontend build, Rust fmt/clippy/tests |
+| `bun run typecheck`                                      | TypeScript, no emit                                                                |
+| `bun run lint`                                           | ESLint                                                                             |
+| `bun run format`                                         | Prettier (write) / `format:check` to verify                                        |
+| `cargo fmt && cargo clippy --all-targets -- -D warnings` | in `src-tauri/`                                                                    |
+| `cargo test`                                             | in `src-tauri/`                                                                    |
+| `bun tauri build`                                        | full production build (slow; rarely needed locally)                                |
 
 `bun run check` is intentionally the same set of checks CI enforces — if it
 passes locally, CI should agree. Debugging: `bun tauri dev` gives you webview

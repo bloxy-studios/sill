@@ -58,7 +58,8 @@ matching unit test at the bottom of `lib.rs` (`cargo test` in `src-tauri/`).
 bun run check
 ```
 
-Runs: TypeScript typecheck, ESLint, Prettier check, `cargo fmt --check`,
+Runs: TypeScript typecheck, ESLint, Prettier check, frontend production
+build, `cargo fmt --check`,
 `cargo clippy -D warnings`, `cargo test`. Green locally ⇒ green in CI.
 
 ## 6. Submit (~5 min)

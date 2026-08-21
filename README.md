@@ -74,7 +74,7 @@ git clone https://github.com/bloxy-studios/sill.git
 cd sill
 bun run setup     # verifies toolchain, installs dependencies
 bun tauri dev     # launches the (currently placeholder) app
-bun run check     # everything CI runs: typecheck, lint, fmt, clippy, tests
+bun run check     # everything CI runs: typecheck, lint, format, build, fmt, clippy, tests
 ```
 
 New contributor? The [30-minute quickstart](docs/CONTRIBUTOR_QUICKSTART.md)

@@ -20,6 +20,9 @@ bun run lint
 step "Prettier (check)"
 bun run format:check
 
+step "Frontend production build"
+bun run build
+
 step "cargo fmt --check"
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
