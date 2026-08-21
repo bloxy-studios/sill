@@ -48,7 +48,7 @@ jobs:
       # rustup reads rust-toolchain.toml; first cargo call installs the pinned toolchain.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: ". -> target"
       - name: cargo fmt
         working-directory: src-tauri
         run: cargo fmt --all -- --check
@@ -80,7 +80,7 @@ jobs:
           bun-version: "1.4.0"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: "./src-tauri -> target"
+          workspaces: ". -> target"
       - name: Install dependencies
         run: bun install --frozen-lockfile
       # Compile the full app without packaging installers (packaging is
