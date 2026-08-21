@@ -13,7 +13,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use sill_core::{SessionEvent, SessionId, SessionManager, SessionOptions, Snapshot};
 
@@ -132,29 +132,27 @@ pub fn run() {
                 let manager = manager.clone();
                 std::thread::Builder::new()
                     .name("sill-dirty-pump".into())
-                    .spawn(move || loop {
-                        let first = match dirty_rx.recv() {
-                            Ok(id) => id,
-                            Err(_) => break,
-                        };
-                        let mut batch: HashSet<SessionId> = HashSet::new();
-                        batch.insert(first);
-                        let deadline = std::time::Instant::now() + FRAME;
-                        loop {
-                            let now = std::time::Instant::now();
-                            if now >= deadline {
-                                break;
-                            }
-                            match dirty_rx.recv_timeout(deadline - now) {
-                                Ok(id) => {
-                                    batch.insert(id);
+                    .spawn(move || {
+                        while let Ok(first) = dirty_rx.recv() {
+                            let mut batch: HashSet<SessionId> = HashSet::new();
+                            batch.insert(first);
+                            let deadline = std::time::Instant::now() + FRAME;
+                            loop {
+                                let now = std::time::Instant::now();
+                                if now >= deadline {
+                                    break;
                                 }
-                                Err(RecvTimeoutError::Timeout) => break,
-                                Err(RecvTimeoutError::Disconnected) => return,
+                                match dirty_rx.recv_timeout(deadline - now) {
+                                    Ok(id) => {
+                                        batch.insert(id);
+                                    }
+                                    Err(RecvTimeoutError::Timeout) => break,
+                                    Err(RecvTimeoutError::Disconnected) => return,
+                                }
                             }
-                        }
-                        for id in batch {
-                            emit_snapshot(&app, &manager, id);
+                            for id in batch {
+                                emit_snapshot(&app, &manager, id);
+                            }
                         }
                     })
                     .expect("spawn dirty pump");
