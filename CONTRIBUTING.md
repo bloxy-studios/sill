@@ -57,6 +57,13 @@ bun tauri dev     # launches the app with hot reload
 Rust, and platform libraries, then runs `bun install`. If it reports a missing
 system library, install it and re-run.
 
+**Troubleshooting: `error: rustc X is not supported … requires rustc 1.98`** —
+cargo is not resolving through rustup's shim, so `rust-toolchain.toml` was
+ignored. Usual cause: a Homebrew/system Rust earlier in PATH. Fix:
+`brew uninstall rust` (or put `$HOME/.cargo/bin` first in PATH), install
+[rustup](https://rustup.rs) if missing, re-run — the pinned toolchain then
+auto-installs. `bun run setup` detects this misconfiguration.
+
 ## Repository layout
 
 ```
