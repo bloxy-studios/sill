@@ -1,0 +1,41 @@
+name: Performance Issue
+description: Slowness, high memory/CPU, latency, or a regression
+labels: ["type:performance", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Performance reports need numbers or a reproducible workload — see
+        [docs/PERFORMANCE.md](https://github.com/bloxy-studios/sill/blob/main/docs/PERFORMANCE.md) for how Sill measures.
+  - type: input
+    id: version
+    attributes:
+      label: Sill version or commit
+    validations:
+      required: true
+  - type: input
+    id: hw
+    attributes:
+      label: Hardware and OS
+      placeholder: "M2 MacBook Air 16GB, macOS 15.5"
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload that shows the problem
+      description: Ideally something anyone can run, e.g. "cat a 100MB log", "20 sessions with builds running".
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: What you measured
+      description: Numbers, profiles, Activity Monitor / htop screenshots — anything quantitative.
+    validations:
+      required: true
+  - type: textarea
+    id: expectation
+    attributes:
+      label: What you expected
+      description: E.g. comparison with another terminal on the same workload (name its version/config).

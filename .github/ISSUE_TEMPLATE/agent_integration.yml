@@ -1,0 +1,41 @@
+name: Agent Integration Request
+description: Request or improve support for a coding agent / CLI tool
+labels: ["type:feature", "area:agent", "status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sill's agent support is provider-neutral by design
+        ([ADR-0007](https://github.com/bloxy-studios/sill/blob/main/docs/decisions/0007-agent-integration-model.md)):
+        integrations are adapters over common mechanisms, and no vendor gets a privileged code path.
+        Note: agent integration is Roadmap Phase 4 — requests filed now inform the design.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent name and version
+      placeholder: "Claude Code 1.x / Codex CLI / Aider 0.x / …"
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Link to the agent's site/repo
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What should Sill understand about this agent?
+      description: E.g. how it signals waiting-for-input, long tasks, completion; process names; TUI quirks.
+    validations:
+      required: true
+  - type: textarea
+    id: signals
+    attributes:
+      label: Known signals it emits (if any)
+      description: OSC 133 / OSC 9 / desktop notifications / exit codes / anything documented.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Your workflow with it
+      description: How you actually run it (per-worktree? parallel sessions? non-interactive?), so the integration serves real use.
