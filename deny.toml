@@ -1,0 +1,65 @@
+# cargo-deny configuration — dependency licensing, advisories, and sources.
+# Run locally: cargo deny check   (from src-tauri/, or with --manifest-path)
+# Policy context: docs/DEPENDENCY_POLICY.md, docs/LICENSING.md
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "transitive"
+# Acknowledged unmaintained-crate advisories (no vulnerabilities). All are
+# transitive dependencies of Tauri v2 itself and have no upstream fix today;
+# each is ignored EXPLICITLY so any newly-published advisory still fails CI.
+# Revisit on every Tauri upgrade (docs/DEPENDENCY_POLICY.md).
+ignore = [
+  # gtk3-rs bindings archived upstream; Tauri's Linux stack (tao/wry/
+  # webkit2gtk/muda) still requires GTK3 until upstream migrates to GTK4.
+  { id = "RUSTSEC-2024-0411", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0412", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0413", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0414", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0415", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0416", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0417", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0418", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0419", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  { id = "RUSTSEC-2024-0420", reason = "gtk3-rs unmaintained; required by tauri linux stack, no upstream fix" },
+  # proc-macro-error unmaintained; transitive via the tauri macro stack.
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive via tauri, no upstream fix" },
+  # unic-* project unmaintained; transitive via tauri.
+  { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained; transitive via tauri, no upstream fix" },
+  { id = "RUSTSEC-2025-0080", reason = "unic-* unmaintained; transitive via tauri, no upstream fix" },
+  { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained; transitive via tauri, no upstream fix" },
+  { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained; transitive via tauri, no upstream fix" },
+  { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained; transitive via tauri, no upstream fix" },
+]
+
+[licenses]
+version = 2
+# Allowlist, not a blocklist: anything unlisted fails and must be reviewed.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

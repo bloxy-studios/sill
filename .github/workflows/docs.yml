@@ -1,0 +1,46 @@
+# Documentation checks. PRs get a fast offline pass (internal file links and
+# anchors — catches renamed/moved docs). A weekly scheduled run checks
+# external links, excluding this repo's own GitHub URLs (some, like
+# Discussions, 404 until enabled) and volatile targets.
+name: Docs
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+  schedule:
+    - cron: "44 6 * * 3" # weekly, Wednesday 06:44 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  internal-links:
+    name: internal links
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --offline --no-progress --include-fragments
+            --exclude-path node_modules --exclude-path src-tauri/target
+            "**/*.md"
+          fail: true
+
+  external-links:
+    name: external links (weekly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress --max-retries 2 --accept "200..=204,429"
+            --exclude "github.com/bloxy-studios/sill"
+            --exclude "mailto:.*"
+            --exclude-path node_modules --exclude-path src-tauri/target
+            "**/*.md"
+          fail: true
