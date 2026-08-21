@@ -1,0 +1,27 @@
+# Workspace root. The Tauri app lives in src-tauri; OS-facing terminal logic
+# (PTY, emulation, sessions) lives in crates/sill-core so it can be built and
+# tested without a webview toolchain. benchmarks/engine-spike is deliberately
+# excluded: it pulls competitor engines for measurement only.
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/sill-core"]
+exclude = ["benchmarks/engine-spike"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Abdul Ali <abdulsdevworkspace@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bloxy-studios/sill"
+edition = "2021"
+rust-version = "1.98"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Perf posture for the app (docs/PERFORMANCE.md): thin LTO + single codegen
+# unit keeps the release binary small and hot paths fast.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
