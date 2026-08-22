@@ -28,7 +28,9 @@
 //! design.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+#[cfg(not(unix))]
+use std::io::Read;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{mpsc, Arc, Mutex, Weak};
@@ -244,6 +246,12 @@ impl SessionManager {
 
         let child_pid = child.process_id();
         let killer = child.clone_killer();
+        // Unix reads the master fd directly with poll() timeouts so the
+        // reader thread is interruptible; other platforms fall back to the
+        // blocking cloned reader.
+        #[cfg(unix)]
+        let master_fd = pair.master.as_raw_fd();
+        #[cfg(not(unix))]
         let reader = pair
             .master
             .try_clone_reader()
@@ -274,15 +282,77 @@ impl SessionManager {
         self.sessions.lock().unwrap().insert(id, inner.clone());
 
         // Reader thread: PTY → engine → dirty edge notification.
+        //
+        // The reader must be INTERRUPTIBLE: a descendant that keeps the PTY
+        // slave open (nohup-style, or a SIGHUP-trapping job in its own
+        // process group) would otherwise pin a blocking read — and with it
+        // this thread, the session's memory, and the master fd — forever.
+        // Unix polls the master fd with a timeout and re-checks `closing`;
+        // like a real terminal, Sill frees its side of the PTY on close and
+        // lets the kernel deal with slave-holding survivors.
         {
             let inner = inner.clone();
             let dirty = dirty.clone();
             let dirty_tx = self.dirty_tx.clone();
+            #[cfg(not(unix))]
             let mut reader = reader;
             thread::Builder::new()
                 .name(format!("sill-pty-read-{}", id.0))
                 .spawn(move || {
                     let mut buf = [0u8; 32 * 1024];
+                    #[cfg(unix)]
+                    {
+                        let Some(fd) = master_fd else {
+                            return;
+                        };
+                        loop {
+                            if inner.closing.load(Ordering::Acquire) {
+                                break;
+                            }
+                            let mut pfd = libc::pollfd {
+                                fd,
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
+                            let ready = unsafe { libc::poll(&mut pfd, 1, 100) };
+                            if ready < 0 {
+                                let err = std::io::Error::last_os_error();
+                                if err.kind() == std::io::ErrorKind::Interrupted {
+                                    continue;
+                                }
+                                break;
+                            }
+                            if ready == 0 {
+                                continue; // timeout: re-check closing
+                            }
+                            let n = unsafe {
+                                libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                            };
+                            match n {
+                                0 => break, // EOF: all slaves closed
+                                n if n < 0 => {
+                                    let err = std::io::Error::last_os_error();
+                                    if err.kind() == std::io::ErrorKind::Interrupted {
+                                        continue;
+                                    }
+                                    break; // EIO on last-slave close, etc.
+                                }
+                                n => {
+                                    if inner.closing.load(Ordering::Acquire) {
+                                        break;
+                                    }
+                                    {
+                                        let mut engine = inner.engine.lock().unwrap();
+                                        engine.feed(&buf[..n as usize]);
+                                    }
+                                    if !dirty.swap(true, Ordering::AcqRel) {
+                                        let _ = dirty_tx.send(inner.id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
                     loop {
                         if inner.closing.load(Ordering::Acquire) {
                             break;
@@ -301,7 +371,6 @@ impl SessionManager {
                                     let _ = dirty_tx.send(inner.id);
                                 }
                             }
-                            // EIO on Linux when the last slave closes: EOF.
                             Err(_) => break,
                         }
                     }
