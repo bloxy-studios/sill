@@ -17,7 +17,7 @@ Records are only created for real decisions. Numbering is chronological.
 | [0003](0003-contribution-licensing.md)  | Contribution licensing: inbound=outbound, no CLA/DCO  | Accepted        |
 | [0004](0004-commit-convention.md)       | Conventional Commits, gently enforced                 | Accepted        |
 | [0005](0005-release-process.md)         | Tag-driven draft releases via CI                      | Accepted        |
-| [0006](0006-terminal-engine.md)         | Terminal emulation engine selection                   | Proposed (open) |
+| [0006](0006-terminal-engine.md)         | Terminal emulation engine selection                   | Accepted        |
 | [0007](0007-agent-integration-model.md) | Provider-neutral agent integration model              | Proposed (open) |
 | [0008](0008-naming-and-crate-policy.md) | Product naming and crate-publishing policy            | Accepted        |
 

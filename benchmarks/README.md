@@ -1,6 +1,9 @@
 # Benchmarks
 
-**Status: no harness and no results exist yet.** This directory is
+**Status: one harness exists — the ADR-0006 engine spike
+([engine-spike/](engine-spike/), results in
+[engine-spike/RESULTS.md](engine-spike/RESULTS.md)). The application-level
+suite below does not exist yet.** This directory is
 deliberately created _before_ the terminal so that the first performance
 claim Sill ever makes is reproducible. Until code lands here, Sill publishes
 no numbers — see [docs/PERFORMANCE.md](../docs/PERFORMANCE.md) for the

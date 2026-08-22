@@ -57,15 +57,23 @@ bun tauri dev     # launches the app with hot reload
 Rust, and platform libraries, then runs `bun install`. If it reports a missing
 system library, install it and re-run.
 
+**Troubleshooting: `error: rustc X is not supported … requires rustc 1.98`** —
+cargo is not resolving through rustup's shim, so `rust-toolchain.toml` was
+ignored. Usual cause: a Homebrew/system Rust earlier in PATH. Fix:
+`brew uninstall rust` (or put `$HOME/.cargo/bin` first in PATH), install
+[rustup](https://rustup.rs) if missing, re-run — the pinned toolchain then
+auto-installs. `bun run setup` detects this misconfiguration.
+
 ## Repository layout
 
 ```
-src/          React + TypeScript frontend (webview)
-src-tauri/    Rust core: application setup, commands, (future) PTY & sessions
-  src/lib.rs  Tauri builder + command handlers
-docs/         Architecture, design, policies
-.github/      CI, issue forms, templates
-scripts/      Developer tooling
+crates/sill-core/  Terminal core: PTY, emulation, sessions (headless, tested)
+src-tauri/         Tauri shell: typed IPC commands + snapshot/event pumps
+src/               React + TypeScript frontend; src/lib/ = renderer, keys
+docs/              Architecture, design, policies
+benchmarks/        Engine spike harness + recorded results
+.github/           CI, issue forms, templates
+scripts/           Developer tooling
 ```
 
 Where code belongs: **anything that touches the OS (PTY, processes, files,

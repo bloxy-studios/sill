@@ -7,18 +7,28 @@ subsystem lives in [docs/design/](design/).
 
 ## What exists today (2026-08)
 
-The repository is a Tauri 2 scaffold plus project infrastructure:
+Phase 2 (minimal terminal) is implemented:
 
-- `src-tauri/` — Rust application shell. `lib.rs` registers a single
-  placeholder IPC command (`greet`) and the `tauri-plugin-opener` plugin.
-  Sandboxing/capabilities: `capabilities/default.json` grants `core:default`
-  and `opener:default` to the main window.
-- `src/` — React 19 + TypeScript frontend (template placeholder UI, will be
-  replaced in Phase 1).
-- Build: Vite 7 frontend, Bun for JS tooling, `tauri build` for packaging.
+- `crates/sill-core/` — the webview-free terminal core (tested headless):
+  - `shell`: zsh-first default-shell resolution with honest fallbacks
+  - `engine`: emulation state over `alacritty_terminal` (ADR-0006, measured);
+    OSC title/bell events, PTY write-backs (DSR/DA), bracketed-paste mode
+  - `snapshot`: render-ready style-run DTOs (data across IPC, never bytes)
+  - `session`: PTY spawn via `portable-pty`, per-session reader/waiter
+    threads, dispatcher answering emulation write-backs, edge-triggered
+    dirty notifications, scrollback capped (default 10k, hard cap 200k)
+- `src-tauri/` — typed IPC commands (`create_session`, `session_input`,
+  `session_resize`, `session_scroll*`, `session_snapshot`, `session_kill`,
+  `session_close`, `list_sessions`) + two pump threads: frame-coalesced
+  snapshot emits (16ms window) and typed session events. Capabilities stay
+  `core:default` + `opener:default`; CSP strict.
+- `src/` — canvas grid renderer (imperative draws, zero per-frame React),
+  keyboard encoding, bracketed-paste-aware paste, resize → PTY, wheel
+  scrollback, exit overlay.
 
-There is **no terminal, PTY, session, or agent functionality yet**. Everything
-below this line is design intent.
+Not yet implemented (design intent below): selection/copy, search, shell
+integration/semantic zones, workspaces/tabs/panes, agent awareness, CLI,
+MCP. Phase 2's GUI leg still needs verification on real display hardware.
 
 ## Target architecture — PROPOSED
 

@@ -1,0 +1,29 @@
+[package]
+name = "sill-core"
+description = "Sill's terminal core: PTY management, emulation state, sessions"
+# Internal workspace crate — NEVER published (ADR-0008: no bare `sill`/`sill-*`
+# names on registries; anything extracted for publication gets renamed first).
+publish = false
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+# PTY abstraction: unix openpty + Windows ConPTY behind one interface.
+portable-pty = "0.9"
+# Terminal emulation engine (ADR-0006): grid state, scrollback, damage.
+alacritty_terminal = "0.26"
+serde = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# Process-group signaling on session close (SIGHUP/SIGKILL to the child's
+# group — real terminal close semantics; see session::SessionInner).
+libc = "0.2"
+

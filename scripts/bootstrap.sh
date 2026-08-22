@@ -26,12 +26,41 @@ else
   note "(package managers like Homebrew/Scoop are available there too)"
 fi
 
-# Rust via rustup (rust-toolchain.toml pins the version)
+# Rust via rustup (rust-toolchain.toml pins the version). The pin only
+# works when cargo resolves through rustup's shim — a Homebrew/system Rust
+# earlier in PATH silently ignores it and fails later with
+# "rustc X is not supported ... requires rustc Y". Catch that here.
+PINNED="$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)"
 if command -v rustup >/dev/null 2>&1; then
-  ok "rustup $(rustup --version 2>/dev/null | head -1 | awk '{print $2}')"
-  note "Toolchain $(grep '^channel' rust-toolchain.toml | cut -d'"' -f2) auto-installs on first cargo use"
+  CARGO_PATH="$(command -v cargo || true)"
+  case "$CARGO_PATH" in
+    "$HOME/.cargo/bin/cargo" | *rustup*)
+      ok "rustup $(rustup --version 2>/dev/null | head -1 | awk '{print $2}') (cargo resolves through the rustup shim)"
+      note "Toolchain $PINNED auto-installs on first cargo use"
+      ;;
+    "")
+      miss "rustup found but no cargo on PATH"
+      note "Add \$HOME/.cargo/bin to PATH (rustup's shims live there)"
+      ;;
+    *)
+      miss "cargo at $CARGO_PATH is NOT rustup's shim — rust-toolchain.toml will be IGNORED"
+      note "Another Rust install (often Homebrew) shadows rustup in PATH."
+      note "Fix: brew uninstall rust    # or put \$HOME/.cargo/bin first in PATH"
+      ;;
+  esac
 elif command -v cargo >/dev/null 2>&1; then
-  ok "cargo $(cargo --version | awk '{print $2}') (no rustup — ensure it matches rust-toolchain.toml)"
+  RUSTC_V="$(rustc --version 2>/dev/null | awk '{print $2}')"
+  case "$RUSTC_V" in
+    "$PINNED"*)
+      ok "cargo $RUSTC_V (no rustup; version happens to match the pin)"
+      note "Installing rustup is still recommended so future pin bumps just work: https://rustup.rs"
+      ;;
+    *)
+      miss "rustc $RUSTC_V found, but this project pins $PINNED (rust-toolchain.toml)"
+      note "Without rustup the pin cannot auto-install the right toolchain."
+      note "Install rustup: https://rustup.rs  (if Rust came from Homebrew: brew uninstall rust first)"
+      ;;
+  esac
 else
   miss "Rust not found"
   note "Install: https://rustup.rs"
