@@ -6,3 +6,5 @@ src-tauri/Cargo.lock
 bun.lock
 LICENSE-MIT
 LICENSE-APACHE
+# Verbatim agent directive prompt — intentionally not style-governed
+CLAUDE.md
