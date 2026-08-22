@@ -1,23 +1,37 @@
-//! Session lifecycle: PTY spawn, reader/waiter threads, typed events.
+//! Session lifecycle: PTY spawn, reader/waiter/dispatcher threads, typed
+//! events.
 //!
 //! Threading model (deliberately boring):
 //! - one *reader* thread per session: blocking PTY reads → engine feed →
 //!   dirty notification (coalesced by the consumer)
 //! - one *waiter* thread per session: blocks on child exit → `Exited` event
-//! - one *dispatcher* thread per manager: drains engine events, answers
+//! - one *dispatcher* thread per session: drains engine events, answers
 //!   PTY write-backs (DSR/DA responses), forwards the rest as typed
-//!   [`SessionEvent`]s
+//!   [`SessionEvent`]s. Holds only a **Weak** reference to the session so a
+//!   closed session's engine (and its scrollback memory) can actually drop —
+//!   the sender side of its channel lives inside the session, so a strong
+//!   reference here would be a leak-by-reference-cycle.
 //!
-//! Backpressure: the reader thread parses synchronously into the engine, so
-//! PTY intake is naturally bounded by parse speed; the UI only ever pulls
-//! bounded snapshots. No unbounded queues of terminal output exist
-//! (docs/design/performance.md).
+//! Backpressure & bounds: the reader parses synchronously into the engine,
+//! so PTY intake is bounded by parse speed. Event channels are **bounded**:
+//! spammable events (bell, title, wakeup) are dropped when full — missing
+//! the 10,000th bell is correct behavior — while must-deliver events
+//! (PTY write-backs, lifecycle) use blocking sends. No unbounded queues of
+//! terminal-derived data exist (docs/design/performance.md).
+//!
+//! Close semantics: closing a session sends SIGHUP to the child's process
+//! leader first (what real terminals do on window close) so job-control
+//! shells can forward it to their jobs, then SIGKILL to the group, so
+//! grandchildren holding the PTY slave open cannot pin the reader
+//! thread and file descriptors forever. Processes that properly daemonize
+//! (setsid/nohup with fd redirection) leave the group/tty and survive, by
+//! design.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -59,6 +73,17 @@ pub enum SessionEvent {
     },
 }
 
+impl SessionEvent {
+    /// Spammable events may be dropped under pressure; lifecycle events
+    /// must always be delivered.
+    fn droppable(&self) -> bool {
+        matches!(
+            self,
+            SessionEvent::TitleChanged { .. } | SessionEvent::Bell { .. }
+        )
+    }
+}
+
 /// Options for creating a session.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
@@ -75,34 +100,103 @@ pub struct SessionOptions {
 
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
+/// Capacity of the per-session engine-event channel. Small: only PtyWrite
+/// is must-deliver (blocking send), everything else drops when full.
+const ENGINE_EVENT_CAPACITY: usize = 256;
+/// Capacity of the manager-level session-event channel.
+const SESSION_EVENT_CAPACITY: usize = 1024;
+
 struct SessionInner {
     id: SessionId,
     engine: Mutex<TermState>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// Child pid == its process-group id (PTY spawn makes it session leader).
+    child_pid: Option<u32>,
     alive: AtomicBool,
+    /// Set by close(): reader exits its loop even if more output races in.
+    closing: AtomicBool,
     title: Mutex<String>,
 }
 
-/// Owns all sessions. Cheap to clone handles out of; internally locked
-/// per-session so one busy session never blocks another's input.
+impl SessionInner {
+    /// Graceful terminal-close semantics, matching what real terminals do:
+    /// SIGHUP the session leader FIRST and give it a grace period — a
+    /// job-control shell (bash/zsh) forwards SIGHUP to its jobs, which live
+    /// in their **own process groups** that plain group-signaling would
+    /// miss. After the grace period, SIGKILL the leader's group for
+    /// anything stubborn. Runs on a detached reaper thread so close() never
+    /// blocks the caller.
+    fn terminate_tree_graceful(self: &Arc<Self>) {
+        #[cfg(unix)]
+        {
+            if let Some(pid) = self.child_pid {
+                let inner = self.clone();
+                let _ = thread::Builder::new()
+                    .name(format!("sill-reap-{}", self.id.0))
+                    .spawn(move || {
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGHUP);
+                        }
+                        thread::sleep(std::time::Duration::from_millis(150));
+                        unsafe {
+                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                        let _ = inner.killer.lock().unwrap().kill();
+                    });
+                return;
+            }
+        }
+        // Fallback / non-unix: kill the direct child via the PTY handle.
+        // (On Windows, ConPTY teardown takes the console tree with it.)
+        let _ = self.killer.lock().unwrap().kill();
+    }
+
+    /// Hard kill (user-initiated `kill`): SIGKILL the leader's group
+    /// immediately, then the PTY child handle as fallback.
+    fn terminate_tree_hard(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child_pid {
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = self.killer.lock().unwrap().kill();
+    }
+}
+
+/// Owns all sessions. Internally locked per-session so one busy session
+/// never blocks another's input.
 pub struct SessionManager {
     sessions: Mutex<HashMap<SessionId, Arc<SessionInner>>>,
     next_id: AtomicU64,
-    events_tx: Sender<SessionEvent>,
-    /// Dirty notifications: session ids whose grid changed. The consumer
-    /// coalesces (recv + drain + frame delay); senders only fire on the
-    /// false→true edge so a flooding session sends one wakeup per frame,
-    /// not one per read.
-    dirty_tx: Sender<SessionId>,
+    events_tx: SyncSender<SessionEvent>,
+    /// Dirty notifications: session ids whose grid changed. Edge-triggered —
+    /// at most one in-flight notification per session (the flag only re-arms
+    /// after a snapshot), so an unbounded channel is bounded in practice by
+    /// the session count.
+    dirty_tx: mpsc::Sender<SessionId>,
     dirty_flags: Mutex<HashMap<SessionId, Arc<AtomicBool>>>,
+}
+
+/// Send with drop-vs-must-deliver policy.
+fn send_session_event(tx: &SyncSender<SessionEvent>, ev: SessionEvent) {
+    if ev.droppable() {
+        match tx.try_send(ev) {
+            Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
+        }
+    } else {
+        // Lifecycle events are rare; blocking briefly on a full queue is
+        // acceptable and guarantees delivery while a receiver exists.
+        let _ = tx.send(ev);
+    }
 }
 
 impl SessionManager {
     /// Create a manager plus its event/dirty receivers.
     pub fn new() -> (Arc<Self>, Receiver<SessionEvent>, Receiver<SessionId>) {
-        let (events_tx, events_rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::sync_channel(SESSION_EVENT_CAPACITY);
         let (dirty_tx, dirty_rx) = mpsc::channel();
         let mgr = Arc::new(Self {
             sessions: Mutex::new(HashMap::new()),
@@ -148,6 +242,7 @@ impl SessionManager {
         // Slave stays open in the child; drop our handle so reader EOF works.
         drop(pair.slave);
 
+        let child_pid = child.process_id();
         let killer = child.clone_killer();
         let reader = pair
             .master
@@ -158,8 +253,8 @@ impl SessionManager {
             .take_writer()
             .map_err(|e| CoreError::Pty(e.to_string()))?;
 
-        // Engine + its event channel (drained by the dispatcher thread).
-        let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>();
+        // Engine + its bounded event channel (drained by the dispatcher).
+        let (engine_tx, engine_rx) = mpsc::sync_channel::<EngineEvent>(ENGINE_EVENT_CAPACITY);
         let engine = TermState::new(TermDims { cols, rows }, scrollback, engine_tx);
 
         let inner = Arc::new(SessionInner {
@@ -168,7 +263,9 @@ impl SessionManager {
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
+            child_pid,
             alive: AtomicBool::new(true),
+            closing: AtomicBool::new(false),
             title: Mutex::new(String::new()),
         });
 
@@ -187,9 +284,15 @@ impl SessionManager {
                 .spawn(move || {
                     let mut buf = [0u8; 32 * 1024];
                     loop {
+                        if inner.closing.load(Ordering::Acquire) {
+                            break;
+                        }
                         match reader.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
+                                if inner.closing.load(Ordering::Acquire) {
+                                    break;
+                                }
                                 {
                                     let mut engine = inner.engine.lock().unwrap();
                                     engine.feed(&buf[..n]);
@@ -206,16 +309,25 @@ impl SessionManager {
                 .expect("spawn pty reader thread");
         }
 
-        // Dispatcher thread: engine events for THIS session.
+        // Dispatcher thread: engine events for THIS session. Holds only a
+        // Weak reference — the engine (which owns the sender) must be able
+        // to drop when the session closes, which then ends this thread via
+        // channel disconnect.
         {
-            let inner = inner.clone();
+            let weak: Weak<SessionInner> = Arc::downgrade(&inner);
             let events_tx = self.events_tx.clone();
             let dirty = dirty.clone();
             let dirty_tx = self.dirty_tx.clone();
+            let session_id = id;
             thread::Builder::new()
                 .name(format!("sill-events-{}", id.0))
                 .spawn(move || {
                     while let Ok(ev) = engine_rx.recv() {
+                        let Some(inner) = weak.upgrade() else {
+                            // Session dropped: drain silently until the
+                            // sender disconnects.
+                            continue;
+                        };
                         match ev {
                             EngineEvent::PtyWrite(text) => {
                                 // Emulation replies (DSR/DA/…) go straight
@@ -227,24 +339,33 @@ impl SessionManager {
                             }
                             EngineEvent::Title(title) => {
                                 *inner.title.lock().unwrap() = title.clone();
-                                let _ = events_tx.send(SessionEvent::TitleChanged {
-                                    id: inner.id,
-                                    title,
-                                });
+                                send_session_event(
+                                    &events_tx,
+                                    SessionEvent::TitleChanged {
+                                        id: session_id,
+                                        title,
+                                    },
+                                );
                             }
                             EngineEvent::ResetTitle => {
                                 inner.title.lock().unwrap().clear();
-                                let _ = events_tx.send(SessionEvent::TitleChanged {
-                                    id: inner.id,
-                                    title: String::new(),
-                                });
+                                send_session_event(
+                                    &events_tx,
+                                    SessionEvent::TitleChanged {
+                                        id: session_id,
+                                        title: String::new(),
+                                    },
+                                );
                             }
                             EngineEvent::Bell => {
-                                let _ = events_tx.send(SessionEvent::Bell { id: inner.id });
+                                send_session_event(
+                                    &events_tx,
+                                    SessionEvent::Bell { id: session_id },
+                                );
                             }
                             EngineEvent::Wakeup => {
                                 if !dirty.swap(true, Ordering::AcqRel) {
-                                    let _ = dirty_tx.send(inner.id);
+                                    let _ = dirty_tx.send(session_id);
                                 }
                             }
                         }
@@ -262,15 +383,18 @@ impl SessionManager {
                 .spawn(move || {
                     let exit_code = child.wait().ok().map(|status| status.exit_code());
                     inner.alive.store(false, Ordering::Release);
-                    let _ = events_tx.send(SessionEvent::Exited {
-                        id: inner.id,
-                        exit_code,
-                    });
+                    send_session_event(
+                        &events_tx,
+                        SessionEvent::Exited {
+                            id: inner.id,
+                            exit_code,
+                        },
+                    );
                 })
                 .expect("spawn child waiter thread");
         }
 
-        let _ = self.events_tx.send(SessionEvent::Created { id });
+        send_session_event(&self.events_tx, SessionEvent::Created { id });
         Ok(id)
     }
 
@@ -289,6 +413,26 @@ impl SessionManager {
         let mut writer = inner.writer.lock().unwrap();
         writer
             .write_all(bytes)
+            .and_then(|_| writer.flush())
+            .map_err(|e| CoreError::Input(e.to_string()))
+    }
+
+    /// Paste text into the session. The wrapping decision is made HERE,
+    /// against the engine's current mode — the frontend never caches
+    /// protocol state (a stale cache can strip bracketed-paste delimiters
+    /// right after a program enables the mode).
+    pub fn paste(&self, id: SessionId, text: &str) -> Result<()> {
+        let inner = self.get(id)?;
+        let normalized = normalize_paste(text);
+        let bracketed = inner.engine.lock().unwrap().bracketed_paste();
+        let payload = if bracketed {
+            format!("\x1b[200~{normalized}\x1b[201~")
+        } else {
+            normalized
+        };
+        let mut writer = inner.writer.lock().unwrap();
+        writer
+            .write_all(payload.as_bytes())
             .and_then(|_| writer.flush())
             .map_err(|e| CoreError::Input(e.to_string()))
     }
@@ -371,25 +515,27 @@ impl SessionManager {
         ids
     }
 
-    /// Terminate the child process (SIGKILL-equivalent via the PTY child
-    /// handle). The waiter thread emits `Exited`.
+    /// Terminate the child's process tree (group SIGHUP + SIGKILL). The
+    /// waiter thread emits `Exited`.
     pub fn kill(&self, id: SessionId) -> Result<()> {
         let inner = self.get(id)?;
-        let result = inner.killer.lock().unwrap().kill();
-        result.map_err(|e| CoreError::Pty(e.to_string()))
+        inner.terminate_tree_hard();
+        Ok(())
     }
 
-    /// Kill (if alive) and remove the session. Dropping the master PTY
-    /// unblocks the reader thread; dropping the engine sender ends the
-    /// dispatcher thread.
+    /// Kill the process tree (if alive) and remove the session. Group
+    /// signaling closes every PTY-slave holder, which EOFs the reader
+    /// thread; dropping the session drops the engine, whose sender
+    /// disconnect ends the dispatcher thread.
     pub fn close(&self, id: SessionId) -> Result<()> {
         let inner = self.get(id)?;
+        inner.closing.store(true, Ordering::Release);
         if inner.alive.load(Ordering::Acquire) {
-            let _ = inner.killer.lock().unwrap().kill();
+            inner.terminate_tree_graceful();
         }
         self.sessions.lock().unwrap().remove(&id);
         self.dirty_flags.lock().unwrap().remove(&id);
-        let _ = self.events_tx.send(SessionEvent::Closed { id });
+        send_session_event(&self.events_tx, SessionEvent::Closed { id });
         Ok(())
     }
 
@@ -400,5 +546,38 @@ impl SessionManager {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Normalize pasted text for PTY input: terminals receive carriage returns,
+/// not newlines.
+pub fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\r").replace('\n', "\r")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_normalization_converts_newlines() {
+        assert_eq!(normalize_paste("a\r\nb\nc"), "a\rb\rc");
+        assert_eq!(normalize_paste("plain"), "plain");
+    }
+
+    #[test]
+    fn droppable_classification() {
+        assert!(SessionEvent::Bell { id: SessionId(1) }.droppable());
+        assert!(SessionEvent::TitleChanged {
+            id: SessionId(1),
+            title: String::new()
+        }
+        .droppable());
+        assert!(!SessionEvent::Exited {
+            id: SessionId(1),
+            exit_code: None
+        }
+        .droppable());
+        assert!(!SessionEvent::Closed { id: SessionId(1) }.droppable());
     }
 }

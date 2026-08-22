@@ -59,8 +59,5 @@ export function encodeKey(e: KeyboardEvent): string | null {
   return null;
 }
 
-/** Normalize pasted text for PTY input; wrap when bracketed paste is on. */
-export function encodePaste(text: string, bracketed: boolean): string {
-  const normalized = text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
-  return bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized;
-}
+// Paste normalization and bracketed-paste wrapping live in Rust
+// (sill-core session::paste) — protocol state is never cached out here.

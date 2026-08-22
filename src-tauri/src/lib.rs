@@ -68,6 +68,15 @@ fn session_input(state: State<'_, Core>, id: SessionId, data: String) -> Result<
         .map_err(|e| e.to_string())
 }
 
+/// Paste text into a session. Bracketed-paste wrapping is decided in RUST
+/// against the engine's live mode — the frontend never caches protocol
+/// state (a stale cache strips delimiters right after a program enables
+/// the mode).
+#[tauri::command]
+fn session_paste(state: State<'_, Core>, id: SessionId, text: String) -> Result<(), String> {
+    state.manager.paste(id, &text).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn session_resize(
     state: State<'_, Core>,
@@ -176,6 +185,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_session,
             session_input,
+            session_paste,
             session_resize,
             session_scroll,
             session_scroll_to_bottom,

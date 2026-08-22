@@ -50,35 +50,50 @@ pub enum EngineEvent {
 }
 
 /// Listener handed to `alacritty_terminal`; forwards the events Sill cares
-/// about into a bounded, session-owned queue. Clipboard *reads* (OSC 52
-/// query) and color queries are intentionally not answered in Phase 2 —
-/// deny-by-default per threat model T2.
+/// about into a **bounded** session-owned queue. Delivery policy: PTY
+/// write-backs (DSR/DA responses) are correctness-critical and use a
+/// blocking send; spammable events (bell/title/wakeup) are dropped when the
+/// queue is full — a hostile `while true; printf '\a'` must cost nothing
+/// but parse time. Clipboard *reads* (OSC 52 query) and color queries are
+/// intentionally not answered in Phase 2 — deny-by-default per threat
+/// model T2.
 pub(crate) struct EventProxy {
-    tx: std::sync::mpsc::Sender<EngineEvent>,
+    tx: std::sync::mpsc::SyncSender<EngineEvent>,
 }
 
 impl EventProxy {
-    pub(crate) fn new(tx: std::sync::mpsc::Sender<EngineEvent>) -> Self {
+    pub(crate) fn new(tx: std::sync::mpsc::SyncSender<EngineEvent>) -> Self {
         Self { tx }
     }
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        let mapped = match event {
-            Event::Title(title) => Some(EngineEvent::Title(title)),
-            Event::ResetTitle => Some(EngineEvent::ResetTitle),
-            Event::Bell => Some(EngineEvent::Bell),
-            Event::PtyWrite(text) => Some(EngineEvent::PtyWrite(text)),
-            Event::Wakeup => Some(EngineEvent::Wakeup),
+        match event {
+            // Must-deliver: emulation replies the child process is waiting
+            // on. Blocking briefly on a full queue is correct; the
+            // dispatcher drains quickly and never blocks on us.
+            Event::PtyWrite(text) => {
+                let _ = self.tx.send(EngineEvent::PtyWrite(text));
+            }
+            // Droppable under pressure: losing a bell/title/wakeup burst is
+            // the designed behavior, not a bug.
+            Event::Title(title) => {
+                let _ = self.tx.try_send(EngineEvent::Title(title));
+            }
+            Event::ResetTitle => {
+                let _ = self.tx.try_send(EngineEvent::ResetTitle);
+            }
+            Event::Bell => {
+                let _ = self.tx.try_send(EngineEvent::Bell);
+            }
+            Event::Wakeup => {
+                let _ = self.tx.try_send(EngineEvent::Wakeup);
+            }
             // ClipboardStore/ClipboardLoad/ColorRequest/…: deliberately
             // dropped for now (threat model T2: clipboard via escape
             // sequences is deny-by-default until the policy surface exists).
-            _ => None,
-        };
-        if let Some(ev) = mapped {
-            // Receiver disappearing just means the session is closing.
-            let _ = self.tx.send(ev);
+            _ => {}
         }
     }
 }
@@ -94,7 +109,7 @@ impl TermState {
     pub fn new(
         dims: TermDims,
         scrollback_lines: usize,
-        events: std::sync::mpsc::Sender<EngineEvent>,
+        events: std::sync::mpsc::SyncSender<EngineEvent>,
     ) -> Self {
         let config = Config {
             scrolling_history: scrollback_lines,
@@ -170,7 +185,7 @@ mod tests {
     use std::sync::mpsc;
 
     fn state(cols: u16, rows: u16) -> (TermState, mpsc::Receiver<EngineEvent>) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(64);
         (TermState::new(TermDims { cols, rows }, 1000, tx), rx)
     }
 
@@ -255,8 +270,26 @@ mod tests {
     }
 
     #[test]
+    fn bell_flood_never_blocks_the_parser() {
+        // Tiny queue, no consumer: a bell flood must complete promptly by
+        // dropping events, not deadlock the feed path.
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut s = TermState::new(TermDims { cols: 20, rows: 4 }, 100, tx);
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            s.feed(b"\x07");
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "bell flood blocked the parser"
+        );
+        // Queue holds at most its capacity.
+        assert!(rx.try_iter().count() <= 4);
+    }
+
+    #[test]
     fn scrollback_is_bounded_by_config() {
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(64);
         let mut s = TermState::new(TermDims { cols: 10, rows: 4 }, 100, tx);
         let mut input = String::new();
         for i in 0..1000 {

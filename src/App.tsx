@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { GridRenderer } from "./lib/renderer";
-import { encodeKey, encodePaste } from "./lib/keys";
+import { encodeKey } from "./lib/keys";
 import type {
   EventPayload,
   SessionId,
@@ -20,7 +20,6 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<GridRenderer | null>(null);
   const sessionRef = useRef<SessionId | null>(null);
-  const snapshotRef = useRef<Snapshot | null>(null);
 
   const [title, setTitle] = useState("Sill");
   const [exitCode, setExitCode] = useState<number | null | undefined>(
@@ -50,7 +49,6 @@ function App() {
       unlisteners.push(
         await listen<SnapshotPayload>("sill://snapshot", ({ payload }) => {
           if (payload.id !== sessionRef.current) return;
-          snapshotRef.current = payload.snapshot;
           rendererRef.current?.draw(payload.snapshot);
         }),
       );
@@ -70,7 +68,6 @@ function App() {
       // First paint (shell prompt may have raced ahead of the listener).
       const snap = await invoke<Snapshot>("session_snapshot", { id });
       if (!disposed) {
-        snapshotRef.current = snap;
         renderer.draw(snap);
       }
 
@@ -119,11 +116,9 @@ function App() {
       const text = e.clipboardData?.getData("text");
       if (sid === null || !text) return;
       e.preventDefault();
-      const bracketed = snapshotRef.current?.bracketed_paste ?? false;
-      void invoke("session_input", {
-        id: sid,
-        data: encodePaste(text, bracketed),
-      });
+      // Bracketed-paste wrapping happens in Rust against live engine mode —
+      // no cached protocol state in the frontend.
+      void invoke("session_paste", { id: sid, text });
     };
 
     const onWheel = (e: WheelEvent) => {

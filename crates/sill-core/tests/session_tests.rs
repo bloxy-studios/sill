@@ -12,6 +12,14 @@ use sill_core::{SessionEvent, SessionId, SessionManager, SessionOptions};
 
 const SH: &str = "/bin/sh";
 
+/// Serialize all tests in this binary: they spawn real processes/threads,
+/// and the thread-count assertions below are only meaningful without
+/// concurrent sibling tests.
+fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn opts(cols: u16, rows: u16) -> SessionOptions {
     SessionOptions {
         cols,
@@ -78,6 +86,7 @@ fn wait_for_event(
 
 #[test]
 fn spawn_echo_roundtrip() {
+    let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -92,6 +101,7 @@ fn spawn_echo_roundtrip() {
 
 #[test]
 fn resize_propagates_to_child() {
+    let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -105,6 +115,7 @@ fn resize_propagates_to_child() {
 
 #[test]
 fn exit_event_carries_status() {
+    let _serial = serial_guard();
     let (mgr, events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -124,6 +135,7 @@ fn exit_event_carries_status() {
 
 #[test]
 fn kill_terminates_session() {
+    let _serial = serial_guard();
     let (mgr, events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -139,6 +151,7 @@ fn kill_terminates_session() {
 
 #[test]
 fn dirty_notifications_fire_on_output() {
+    let _serial = serial_guard();
     let (mgr, _events, dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -155,6 +168,7 @@ fn dirty_notifications_fire_on_output() {
 
 #[test]
 fn scrollback_and_display_offset() {
+    let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 10)).expect("create session");
 
@@ -185,6 +199,7 @@ fn scrollback_and_display_offset() {
 
 #[test]
 fn title_osc_reaches_events() {
+    let _serial = serial_guard();
     let (mgr, events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
@@ -206,6 +221,7 @@ fn title_osc_reaches_events() {
 /// object-lifetime half.)
 #[test]
 fn create_close_churn_leaves_no_sessions() {
+    let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     for _ in 0..25 {
         let id = mgr.create(opts(60, 16)).expect("create session");
@@ -217,6 +233,7 @@ fn create_close_churn_leaves_no_sessions() {
 
 #[test]
 fn unknown_session_errors_are_typed() {
+    let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let bogus = SessionId(999_999);
     assert!(matches!(
@@ -224,4 +241,157 @@ fn unknown_session_errors_are_typed() {
         Err(sill_core::CoreError::UnknownSession(_))
     ));
     assert!(mgr.snapshot(bogus).is_err());
+}
+
+/// Count this process's live threads (Linux). Used to prove workers exit.
+#[cfg(target_os = "linux")]
+fn thread_count() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Threads:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_threads_back_to(baseline: usize, timeout: Duration) -> usize {
+    let start = Instant::now();
+    loop {
+        let now = thread_count();
+        if now <= baseline || start.elapsed() > timeout {
+            return now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The leak Greptile caught: a dispatcher holding a strong Arc to its own
+/// session pins the engine (and its channel sender) forever. All three
+/// worker threads must exit after close, returning the process to its
+/// thread baseline.
+#[cfg(target_os = "linux")]
+#[test]
+fn close_releases_all_worker_threads() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let baseline = thread_count();
+
+    for _ in 0..10 {
+        let id = mgr.create(opts(60, 16)).expect("create session");
+        mgr.input(id, b"printf x\n").unwrap();
+        mgr.close(id).unwrap();
+    }
+
+    let after = wait_threads_back_to(baseline, Duration::from_secs(15));
+    assert!(
+        after <= baseline,
+        "worker threads leaked: baseline {baseline}, after churn {after}"
+    );
+    assert!(mgr.is_empty());
+}
+
+/// A grandchild holding the PTY slave open must not survive close() and pin
+/// the reader thread: close sends SIGHUP+SIGKILL to the process GROUP.
+#[cfg(target_os = "linux")]
+#[test]
+fn close_terminates_grandchildren_holding_the_pty() {
+    let _serial = serial_guard();
+    let (mgr, events, _dirty) = SessionManager::new();
+    let baseline = thread_count();
+
+    let id = mgr.create(opts(80, 24)).expect("create session");
+    // Background grandchild inheriting the slave fds, then prove it's up.
+    mgr.input(id, b"sleep 300 &\nprintf 'grandchild-up-%s\\n' yes\n")
+        .unwrap();
+    wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("grandchild-up-yes")
+    });
+
+    mgr.close(id).unwrap();
+    wait_for_event(
+        &events,
+        Duration::from_secs(10),
+        |e| matches!(e, SessionEvent::Exited { id: eid, .. } if *eid == id),
+    );
+
+    let after = wait_threads_back_to(baseline, Duration::from_secs(15));
+    assert!(
+        after <= baseline,
+        "grandchild pinned session workers: baseline {baseline}, after {after}"
+    );
+}
+
+/// Paste wrapping is decided in Rust against live engine mode — no stale
+/// frontend cache. Interactive bash enables mode 2004 itself at every
+/// prompt (readline would consume the delimiters), so we paste into `cat`
+/// (no readline): the tty's ECHOCTL then renders the wrapped ESC as ^[ on
+/// screen, which is what we assert.
+#[test]
+fn paste_wraps_when_bracketed_mode_is_active() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(100, 24)).expect("create session");
+
+    // Interactive bash toggles 2004 off while a command runs and back on at
+    // each prompt (the engine tracks this faithfully), so the FOREGROUND
+    // program must enable the mode itself for it to be active during the
+    // paste. `cat -v` then proves what the child actually RECEIVED, with
+    // control bytes rendered printably (^[) — independent of tty echo
+    // settings (with ECHOCTL off, echoed raw delimiters round-trip through
+    // our own parser and are consumed as unknown CSI).
+    mgr.input(id, b"printf '\\033[?2004h'; cat -v\n").unwrap();
+    let start = Instant::now();
+    while !mgr.snapshot(id).unwrap().bracketed_paste {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "bracketed paste mode never became active"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+
+    mgr.paste(id, "pasted-bit\n").unwrap();
+    // The close-delimiter has no trailing newline; flush cat's canonical
+    // input buffer so it prints.
+    mgr.input(id, b"\n").unwrap();
+    wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("200~pasted-bit") && s.contains("201~")
+    });
+
+    mgr.close(id).unwrap();
+}
+
+/// With mode 2004 explicitly disabled (and no readline prompt to re-enable
+/// it), paste must arrive unwrapped.
+#[test]
+fn paste_stays_raw_without_bracketed_mode() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(100, 24)).expect("create session");
+
+    mgr.input(id, b"printf '\\033[?2004l'\n").unwrap();
+    let start = Instant::now();
+    while mgr.snapshot(id).unwrap().bracketed_paste {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "bracketed paste mode never deactivated"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    mgr.input(id, b"cat > /dev/null\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    mgr.paste(id, "raw-bit\n").unwrap();
+    let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| s.contains("raw-bit"));
+    assert!(
+        !screen.contains("200~"),
+        "unexpected bracketed delimiters:\n{screen}"
+    );
+
+    mgr.close(id).unwrap();
 }
