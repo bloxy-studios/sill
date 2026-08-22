@@ -50,13 +50,12 @@ pub enum EngineEvent {
 }
 
 /// Listener handed to `alacritty_terminal`; forwards the events Sill cares
-/// about into a **bounded** session-owned queue. Delivery policy: PTY
-/// write-backs (DSR/DA responses) are correctness-critical and use a
-/// blocking send; spammable events (bell/title/wakeup) are dropped when the
-/// queue is full — a hostile `while true; printf '\a'` must cost nothing
-/// but parse time. Clipboard *reads* (OSC 52 query) and color queries are
-/// intentionally not answered in Phase 2 — deny-by-default per threat
-/// model T2.
+/// about into a **bounded** session-owned queue. Everything is try_send:
+/// spammable events (bell/title/wakeup) drop under pressure by design, and
+/// even response write-backs drop once the queue fills — see the PtyWrite
+/// arm for why a blocking send there is a session-freezing deadlock.
+/// Clipboard *reads* (OSC 52 query) and color queries are intentionally
+/// not answered in Phase 2 — deny-by-default per threat model T2.
 pub(crate) struct EventProxy {
     tx: std::sync::mpsc::SyncSender<EngineEvent>,
 }
@@ -70,11 +69,16 @@ impl EventProxy {
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
-            // Must-deliver: emulation replies the child process is waiting
-            // on. Blocking briefly on a full queue is correct; the
-            // dispatcher drains quickly and never blocks on us.
+            // Response write-backs are best-effort WITH a drop bound: a
+            // hostile child can flood query requests (ESC[6n …) without
+            // ever reading the replies, filling the PTY buffer, blocking
+            // the dispatcher's write, filling this queue — and a blocking
+            // send here would then wedge the reader WHILE IT HOLDS THE
+            // ENGINE LOCK, freezing the whole session. Dropping replies to
+            // a child that isn't reading them is the correct defense
+            // (threat model T1: cap/validate query responses).
             Event::PtyWrite(text) => {
-                let _ = self.tx.send(EngineEvent::PtyWrite(text));
+                let _ = self.tx.try_send(EngineEvent::PtyWrite(text));
             }
             // Droppable under pressure: losing a bell/title/wakeup burst is
             // the designed behavior, not a bug.

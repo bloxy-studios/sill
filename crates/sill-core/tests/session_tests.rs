@@ -403,3 +403,42 @@ fn paste_stays_raw_without_bracketed_mode() {
 
     mgr.close(id).unwrap();
 }
+
+/// A child that floods terminal queries (ESC[6n) without EVER reading the
+/// replies must not freeze the session. The old deadlock chain: PTY buffer
+/// fills -> dispatcher blocks writing replies -> PtyWrite queue fills ->
+/// reader blocks sending WHILE HOLDING THE ENGINE LOCK -> snapshot()/close()
+/// hang forever. Replies now drop under flood; the engine lock stays live.
+#[test]
+fn query_flood_without_reader_stays_responsive() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 24)).expect("create session");
+
+    // Replace the shell with a pure flooder that never reads stdin.
+    mgr.input(id, b"exec sh -c 'while :; do printf \"\\033[6n\"; done'\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Liveness probe: the snapshot path takes the engine lock — exactly
+    // what the old deadlock parked forever. Run it off-thread so a
+    // regression fails the assertion instead of hanging the harness.
+    let probe_mgr = mgr.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            let _ = probe_mgr.snapshot(id);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("snapshot path deadlocked under query flood");
+
+    mgr.close(id).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let leftover = wait_sill_threads_zero(Duration::from_secs(15));
+        assert!(leftover.is_empty(), "workers pinned by flood: {leftover:?}");
+    }
+}

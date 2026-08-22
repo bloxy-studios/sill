@@ -145,6 +145,15 @@ impl SessionInner {
                         unsafe {
                             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                         }
+                        // Linux: also sweep every process in the child's
+                        // SESSION — background jobs under non-forwarding
+                        // shells (dash-style) live in their own process
+                        // groups that group-signaling misses. This goes
+                        // beyond classic terminal behavior (which leaves
+                        // them running); processes that setsid() away
+                        // remain deliberate survivors.
+                        #[cfg(target_os = "linux")]
+                        kill_session_members(pid);
                         let _ = inner.killer.lock().unwrap().kill();
                     });
                 return;
@@ -493,17 +502,24 @@ impl SessionManager {
     pub fn paste(&self, id: SessionId, text: &str) -> Result<()> {
         let inner = self.get(id)?;
         let normalized = normalize_paste(text);
-        let bracketed = inner.engine.lock().unwrap().bracketed_paste();
-        let payload = if bracketed {
+        // Hold the ENGINE lock across the write: mode toggles arrive only
+        // through the reader's feed (which needs this lock), so the
+        // wrapping decision and the write are atomic with respect to mode
+        // changes. Lock order stays acyclic: paste takes engine→writer,
+        // the reader takes engine only, the dispatcher takes writer only.
+        let engine = inner.engine.lock().unwrap();
+        let payload = if engine.bracketed_paste() {
             format!("\x1b[200~{normalized}\x1b[201~")
         } else {
             normalized
         };
         let mut writer = inner.writer.lock().unwrap();
-        writer
+        let result = writer
             .write_all(payload.as_bytes())
-            .and_then(|_| writer.flush())
-            .map_err(|e| CoreError::Input(e.to_string()))
+            .and_then(|_| writer.flush());
+        drop(writer);
+        drop(engine);
+        result.map_err(|e| CoreError::Input(e.to_string()))
     }
 
     /// Resize PTY + emulation.
@@ -615,6 +631,42 @@ impl SessionManager {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Linux: SIGKILL every process whose session id equals `sid` (the PTY
+/// child is its session's leader). Best-effort /proc sweep; racing pids and
+/// permission errors are ignored.
+#[cfg(target_os = "linux")]
+fn kill_session_members(sid: u32) {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid_str) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // Field 6 (1-based) after the parenthesized comm is the session id;
+        // split after the LAST ')' to survive parentheses in comm.
+        let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        // rest fields: [state, ppid, pgrp, session, ...]
+        if let Some(session) = fields.get(3).and_then(|v| v.parse::<u32>().ok()) {
+            if session == sid && pid != sid {
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
     }
 }
 
