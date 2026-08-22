@@ -112,6 +112,10 @@ struct SessionInner {
     id: SessionId,
     engine: Mutex<TermState>,
     writer: Mutex<Box<dyn Write + Send>>,
+    /// Raw master fd (unix): PTY writes go through poll(POLLOUT)+write so a
+    /// child that stops reading its input can never wedge a lock holder.
+    #[cfg(unix)]
+    master_fd: Option<std::os::unix::io::RawFd>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// Child pid == its process-group id (PTY spawn makes it session leader).
@@ -122,7 +126,70 @@ struct SessionInner {
     title: Mutex<String>,
 }
 
+/// Unix: write with a poll(POLLOUT) bound per chunk. Returns Err if the PTY
+/// stays unwritable past the timeout (child not reading its input) — every
+/// caller treats that as "drop/report", never "wait forever". This is what
+/// keeps a stuffed PTY from wedging whichever lock the writer holds.
+#[cfg(unix)]
+fn bounded_pty_write(
+    fd: std::os::unix::io::RawFd,
+    bytes: &[u8],
+    timeout_ms: i32,
+) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ready < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if ready == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "pty not accepting input (child not reading)",
+            ));
+        }
+        let n = unsafe {
+            libc::write(
+                fd,
+                bytes[written..].as_ptr() as *const libc::c_void,
+                bytes.len() - written,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        written += n as usize;
+    }
+    Ok(())
+}
+
 impl SessionInner {
+    /// Write bytes to the PTY, bounded on unix (see [`bounded_pty_write`]).
+    /// The writer mutex still serializes writers for byte-stream integrity.
+    fn write_to_pty(&self, bytes: &[u8], timeout_ms: i32) -> std::io::Result<()> {
+        let mut writer = self.writer.lock().unwrap();
+        #[cfg(unix)]
+        if let Some(fd) = self.master_fd {
+            let _ = timeout_ms;
+            return bounded_pty_write(fd, bytes, timeout_ms);
+        }
+        let _ = timeout_ms;
+        writer.write_all(bytes).and_then(|_| writer.flush())
+    }
+
     /// Graceful terminal-close semantics, matching what real terminals do:
     /// SIGHUP the session leader FIRST and give it a grace period — a
     /// job-control shell (bash/zsh) forwards SIGHUP to its jobs, which live
@@ -172,6 +239,10 @@ impl SessionInner {
             unsafe {
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             }
+            // Background jobs in their own process groups survive the
+            // group kill; sweep the whole session (Linux).
+            #[cfg(target_os = "linux")]
+            kill_session_members(pid);
         }
         let _ = self.killer.lock().unwrap().kill();
     }
@@ -255,9 +326,9 @@ impl SessionManager {
 
         let child_pid = child.process_id();
         let killer = child.clone_killer();
-        // Unix reads the master fd directly with poll() timeouts so the
-        // reader thread is interruptible; other platforms fall back to the
-        // blocking cloned reader.
+        // Unix reads and writes the master fd directly with poll() bounds so
+        // neither direction can block a thread forever; other platforms fall
+        // back to the blocking portable-pty handles.
         #[cfg(unix)]
         let master_fd = pair.master.as_raw_fd();
         #[cfg(not(unix))]
@@ -278,6 +349,8 @@ impl SessionManager {
             id,
             engine: Mutex::new(engine),
             writer: Mutex::new(writer),
+            #[cfg(unix)]
+            master_fd,
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
             child_pid,
@@ -408,12 +481,12 @@ impl SessionManager {
                         };
                         match ev {
                             EngineEvent::PtyWrite(text) => {
-                                // Emulation replies (DSR/DA/…) go straight
-                                // back to the PTY.
-                                if let Ok(mut w) = inner.writer.lock() {
-                                    let _ = w.write_all(text.as_bytes());
-                                    let _ = w.flush();
-                                }
+                                // Emulation replies (DSR/DA/…) go back to
+                                // the PTY with a SHORT bound — replies to a
+                                // child that isn't reading are dropped
+                                // (threat model T1), never waited on while
+                                // holding the writer lock.
+                                let _ = inner.write_to_pty(text.as_bytes(), 50);
                             }
                             EngineEvent::Title(title) => {
                                 *inner.title.lock().unwrap() = title.clone();
@@ -488,10 +561,10 @@ impl SessionManager {
     /// Write user input bytes to the session's PTY.
     pub fn input(&self, id: SessionId, bytes: &[u8]) -> Result<()> {
         let inner = self.get(id)?;
-        let mut writer = inner.writer.lock().unwrap();
-        writer
-            .write_all(bytes)
-            .and_then(|_| writer.flush())
+        // Bounded: typing into a child that stopped reading errors after
+        // ~1s instead of freezing the caller.
+        inner
+            .write_to_pty(bytes, 1000)
             .map_err(|e| CoreError::Input(e.to_string()))
     }
 
@@ -513,11 +586,11 @@ impl SessionManager {
         } else {
             normalized
         };
-        let mut writer = inner.writer.lock().unwrap();
-        let result = writer
-            .write_all(payload.as_bytes())
-            .and_then(|_| writer.flush());
-        drop(writer);
+        // Bounded write while holding the engine lock: atomic vs mode
+        // toggles, and a stuffed PTY errors out after ~1s instead of
+        // freezing every engine-lock user (the deadlock a blocking write
+        // here would reintroduce).
+        let result = inner.write_to_pty(payload.as_bytes(), 1000);
         drop(engine);
         result.map_err(|e| CoreError::Input(e.to_string()))
     }
@@ -617,6 +690,15 @@ impl SessionManager {
         inner.closing.store(true, Ordering::Release);
         if inner.alive.load(Ordering::Acquire) {
             inner.terminate_tree_graceful();
+        } else {
+            // The shell already exited, but separately process-grouped
+            // background jobs may survive holding the PTY. Never signal the
+            // reaped leader pid (pid-reuse hazard) — sweep by SESSION id,
+            // which cannot be reused while any member lives.
+            #[cfg(target_os = "linux")]
+            if let Some(pid) = inner.child_pid {
+                kill_session_members(pid);
+            }
         }
         self.sessions.lock().unwrap().remove(&id);
         self.dirty_flags.lock().unwrap().remove(&id);
@@ -670,6 +752,34 @@ fn kill_session_members(sid: u32) {
     }
 }
 
+impl Drop for SessionManager {
+    /// App-exit / manager-teardown path: without this, dropping the manager
+    /// would strand reader threads polling forever (closing never set) and
+    /// leave children running. Hard teardown is correct here — graceful
+    /// close is the interactive path.
+    fn drop(&mut self) {
+        let sessions: Vec<Arc<SessionInner>> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, v)| v)
+            .collect();
+        self.dirty_flags.lock().unwrap().clear();
+        for inner in sessions {
+            inner.closing.store(true, Ordering::Release);
+            if inner.alive.load(Ordering::Acquire) {
+                inner.terminate_tree_hard();
+            } else {
+                #[cfg(target_os = "linux")]
+                if let Some(pid) = inner.child_pid {
+                    kill_session_members(pid);
+                }
+            }
+        }
+    }
+}
+
 /// Normalize pasted text for PTY input: terminals receive carriage returns,
 /// not newlines.
 pub fn normalize_paste(text: &str) -> String {
@@ -679,6 +789,43 @@ pub fn normalize_paste(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mechanism that keeps a stuffed PTY from wedging lock holders:
+    /// once the write side stops draining, bounded_pty_write must return
+    /// TimedOut promptly instead of blocking. A pipe gives a deterministic
+    /// full buffer (ptys vary by line discipline: canonical mode discards
+    /// on overflow).
+    #[cfg(unix)]
+    #[test]
+    fn bounded_write_times_out_on_full_buffer() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+
+        let chunk = [b'x'; 8192];
+        let start = std::time::Instant::now();
+        let mut saw_timeout = false;
+        for _ in 0..64 {
+            match bounded_pty_write(write_fd, &chunk, 200) {
+                Ok(()) => continue,
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+                    saw_timeout = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_timeout, "expected a timeout once the buffer filled");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "bounded write took implausibly long"
+        );
+
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+    }
 
     #[test]
     fn paste_normalization_converts_newlines() {

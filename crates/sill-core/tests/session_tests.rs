@@ -442,3 +442,100 @@ fn query_flood_without_reader_stays_responsive() {
         assert!(leftover.is_empty(), "workers pinned by flood: {leftover:?}");
     }
 }
+
+/// Extract "BGPID:<pid>" printed by the shell so tests can check descendant
+/// liveness via /proc directly.
+/// Poll until a parseable "BGPID:<digits>" appears (the echoed command line
+/// contains the literal `$!`, so matching must require the expansion).
+#[cfg(target_os = "linux")]
+fn wait_bg_pid(mgr: &Arc<SessionManager>, id: SessionId, timeout: Duration) -> u32 {
+    let start = Instant::now();
+    loop {
+        let screen = visible_text(mgr, id);
+        if let Some(pid) = screen
+            .lines()
+            .rev()
+            .filter_map(|l| l.split("BGPID:").nth(1))
+            .find_map(|v| v.trim().parse::<u32>().ok())
+        {
+            return pid;
+        }
+        if start.elapsed() > timeout {
+            panic!("no parseable BGPID on screen:\n{screen}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_pid_gone(pid: u32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            return true;
+        }
+        if start.elapsed() > timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// close() must sweep separately-grouped descendants even when the shell
+/// already exited (the waiter cleared `alive` — cleanup must not be gated
+/// on it).
+#[cfg(target_os = "linux")]
+#[test]
+fn close_after_shell_exit_sweeps_descendants() {
+    let _serial = serial_guard();
+    let (mgr, events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(100, 24)).expect("create session");
+
+    mgr.input(id, b"sleep 300 &\necho BGPID:$!\n").unwrap();
+    let bg = wait_bg_pid(&mgr, id, Duration::from_secs(10));
+
+    // Shell exits on its own; the background job survives it.
+    mgr.input(id, b"exit\n").unwrap();
+    wait_for_event(
+        &events,
+        Duration::from_secs(10),
+        |e| matches!(e, SessionEvent::Exited { id: eid, .. } if *eid == id),
+    );
+    assert!(
+        std::path::Path::new(&format!("/proc/{bg}")).exists(),
+        "background job should outlive the shell in this scenario"
+    );
+
+    mgr.close(id).unwrap();
+    assert!(
+        wait_pid_gone(bg, Duration::from_secs(10)),
+        "descendant survived close() after shell exit"
+    );
+    let leftover = wait_sill_threads_zero(Duration::from_secs(15));
+    assert!(leftover.is_empty(), "workers pinned: {leftover:?}");
+}
+
+/// Hard kill() must take separately-grouped descendants with it, same as
+/// graceful close.
+#[cfg(target_os = "linux")]
+#[test]
+fn hard_kill_sweeps_descendants() {
+    let _serial = serial_guard();
+    let (mgr, events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(100, 24)).expect("create session");
+
+    mgr.input(id, b"sleep 300 &\necho BGPID:$!\n").unwrap();
+    let bg = wait_bg_pid(&mgr, id, Duration::from_secs(10));
+
+    mgr.kill(id).unwrap();
+    wait_for_event(
+        &events,
+        Duration::from_secs(10),
+        |e| matches!(e, SessionEvent::Exited { id: eid, .. } if *eid == id),
+    );
+    assert!(
+        wait_pid_gone(bg, Duration::from_secs(10)),
+        "descendant survived hard kill()"
+    );
+    mgr.close(id).unwrap();
+}
