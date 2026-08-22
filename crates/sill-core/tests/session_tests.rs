@@ -243,27 +243,37 @@ fn unknown_session_errors_are_typed() {
     assert!(mgr.snapshot(bogus).is_err());
 }
 
-/// Count this process's live threads (Linux). Used to prove workers exit.
+/// Count live sill worker threads by name (Linux): every session worker is
+/// named `sill-*` (pty-read/events/wait/reap). Counting only our own named
+/// threads keeps the assertion immune to test-harness threads — libtest
+/// runs sibling tests on threads that queue on the serial guard and would
+/// pollute a process-wide count.
 #[cfg(target_os = "linux")]
-fn thread_count() -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Threads:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|v| v.parse().ok())
-        })
-        .unwrap_or(0)
+fn sill_thread_names() -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+        for t in tasks.flatten() {
+            if let Ok(comm) = std::fs::read_to_string(t.path().join("comm")) {
+                let comm = comm.trim();
+                if comm.starts_with("sill") {
+                    names.push(comm.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 #[cfg(target_os = "linux")]
-fn wait_threads_back_to(baseline: usize, timeout: Duration) -> usize {
+fn wait_sill_threads_zero(timeout: Duration) -> Vec<String> {
     let start = Instant::now();
     loop {
-        let now = thread_count();
-        if now <= baseline || start.elapsed() > timeout {
-            return now;
+        let names = sill_thread_names();
+        if names.is_empty() {
+            return names;
+        }
+        if start.elapsed() > timeout {
+            return names;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -278,7 +288,6 @@ fn wait_threads_back_to(baseline: usize, timeout: Duration) -> usize {
 fn close_releases_all_worker_threads() {
     let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
-    let baseline = thread_count();
 
     for _ in 0..10 {
         let id = mgr.create(opts(60, 16)).expect("create session");
@@ -286,10 +295,10 @@ fn close_releases_all_worker_threads() {
         mgr.close(id).unwrap();
     }
 
-    let after = wait_threads_back_to(baseline, Duration::from_secs(15));
+    let leftover = wait_sill_threads_zero(Duration::from_secs(15));
     assert!(
-        after <= baseline,
-        "worker threads leaked: baseline {baseline}, after churn {after}"
+        leftover.is_empty(),
+        "worker threads leaked after churn: {leftover:?}"
     );
     assert!(mgr.is_empty());
 }
@@ -301,7 +310,6 @@ fn close_releases_all_worker_threads() {
 fn close_terminates_grandchildren_holding_the_pty() {
     let _serial = serial_guard();
     let (mgr, events, _dirty) = SessionManager::new();
-    let baseline = thread_count();
 
     let id = mgr.create(opts(80, 24)).expect("create session");
     // Background grandchild inheriting the slave fds, then prove it's up.
@@ -318,10 +326,10 @@ fn close_terminates_grandchildren_holding_the_pty() {
         |e| matches!(e, SessionEvent::Exited { id: eid, .. } if *eid == id),
     );
 
-    let after = wait_threads_back_to(baseline, Duration::from_secs(15));
+    let leftover = wait_sill_threads_zero(Duration::from_secs(15));
     assert!(
-        after <= baseline,
-        "grandchild pinned session workers: baseline {baseline}, after {after}"
+        leftover.is_empty(),
+        "grandchild pinned session workers: {leftover:?}"
     );
 }
 
