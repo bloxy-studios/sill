@@ -126,7 +126,15 @@ function App() {
     setSearchOpen(false);
     setSearchMiss(false);
     const sid = sessionRef.current;
-    if (sid !== null) void invoke("session_search_close", { id: sid });
+    if (sid === null) return;
+    // Invalidate pending search UI work and order the close AFTER any
+    // queued search commands: an unresolved start must not reactivate
+    // highlights or keep backend search state alive once Escape closed
+    // the bar. Close is the chain's final word until a new search runs.
+    searchSeqRef.current++;
+    searchChainRef.current = searchChainRef.current
+      .then(() => invoke("session_search_close", { id: sid }))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
