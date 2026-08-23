@@ -515,27 +515,38 @@ fn close_after_shell_exit_sweeps_descendants() {
     assert!(leftover.is_empty(), "workers pinned: {leftover:?}");
 }
 
+/// Find the viewport (row, col) where `needle` starts. The needle must be
+/// ASCII (byte index == column). Prompt placement varies by shell — dash
+/// can flush its prompt onto the same line as command output — so tests
+/// locate content instead of assuming it starts a line.
+fn find_on_screen(screen: &str, needle: &str) -> (usize, usize) {
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(r, l)| l.find(needle).map(|c| (r, c)))
+        .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{screen}"))
+}
+
 /// Selection over known PTY output must extract EXACTLY the selected
 /// cells — grid truth, not an approximation (issue #4 required test).
+/// The `%s` split keeps the assembled needle out of the echoed command
+/// line (same trick as `spawn_echo_roundtrip`).
 #[test]
 fn selection_extracts_exact_pty_output() {
     let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
-    mgr.input(id, b"printf 'sel-target\\n'\n").unwrap();
-    // Match the whole line: the echoed command also contains the string.
+    mgr.input(id, b"printf 'sel-%s\\n' target\n").unwrap();
     let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
-        s.lines().any(|l| l == "sel-target")
+        s.contains("sel-target")
     });
-    let row = screen
-        .lines()
-        .position(|l| l == "sel-target")
-        .expect("output row on screen");
+    let (row, col) = find_on_screen(&screen, "sel-target");
 
-    mgr.selection_start(id, row, 0, CellSide::Left, SelectionMode::Simple)
+    mgr.selection_start(id, row, col, CellSide::Left, SelectionMode::Simple)
         .unwrap();
-    mgr.selection_update(id, row, 9, CellSide::Right).unwrap();
+    mgr.selection_update(id, row, col + 9, CellSide::Right)
+        .unwrap();
     assert_eq!(
         mgr.selection_text(id).unwrap().as_deref(),
         Some("sel-target")
@@ -546,36 +557,34 @@ fn selection_extracts_exact_pty_output() {
     assert_eq!(
         (
             sel.start_row as usize,
-            sel.start_col,
+            sel.start_col as usize,
             sel.end_row as usize,
-            sel.end_col
+            sel.end_col as usize
         ),
-        (row, 0, row, 9)
+        (row, col, row, col + 9)
     );
 
     mgr.close(id).unwrap();
 }
 
 /// Double-click semantics: a single semantic anchor expands to the word
-/// under it ('-' is not a semantic separator).
+/// under it ('-' is not a semantic separator). The `%s` split keeps the
+/// assembled sentence out of the echoed command line.
 #[test]
 fn semantic_selection_selects_word_from_pty_output() {
     let _serial = serial_guard();
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
-    mgr.input(id, b"printf 'alpha beta-gamma delta\\n'\n")
+    mgr.input(id, b"printf 'alpha %s delta\\n' beta-gamma\n")
         .unwrap();
     let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
-        s.lines().any(|l| l == "alpha beta-gamma delta")
+        s.contains("alpha beta-gamma delta")
     });
-    let row = screen
-        .lines()
-        .position(|l| l == "alpha beta-gamma delta")
-        .expect("output row on screen");
+    let (row, col) = find_on_screen(&screen, "alpha beta-gamma delta");
 
-    // Column 8 sits inside "beta-gamma".
-    mgr.selection_start(id, row, 8, CellSide::Left, SelectionMode::Semantic)
+    // Anchor two cells into "beta-gamma".
+    mgr.selection_start(id, row, col + 8, CellSide::Left, SelectionMode::Semantic)
         .unwrap();
     assert_eq!(
         mgr.selection_text(id).unwrap().as_deref(),
@@ -593,18 +602,16 @@ fn selection_clears_on_user_input() {
     let (mgr, _events, _dirty) = SessionManager::new();
     let id = mgr.create(opts(80, 24)).expect("create session");
 
-    mgr.input(id, b"printf 'clear-me\\n'\n").unwrap();
+    mgr.input(id, b"printf 'clear-%s\\n' me\n").unwrap();
     let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
-        s.lines().any(|l| l == "clear-me")
+        s.contains("clear-me")
     });
-    let row = screen
-        .lines()
-        .position(|l| l == "clear-me")
-        .expect("output row on screen");
+    let (row, col) = find_on_screen(&screen, "clear-me");
 
-    mgr.selection_start(id, row, 0, CellSide::Left, SelectionMode::Simple)
+    mgr.selection_start(id, row, col, CellSide::Left, SelectionMode::Simple)
         .unwrap();
-    mgr.selection_update(id, row, 7, CellSide::Right).unwrap();
+    mgr.selection_update(id, row, col + 7, CellSide::Right)
+        .unwrap();
     assert!(mgr.selection_text(id).unwrap().is_some());
 
     mgr.input(id, b" ").unwrap();
