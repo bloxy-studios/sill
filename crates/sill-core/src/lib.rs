@@ -15,8 +15,9 @@ pub mod snapshot;
 
 use std::fmt;
 
+pub use engine::{CellSide, SelectionMode};
 pub use session::{SessionEvent, SessionId, SessionManager, SessionOptions};
-pub use snapshot::Snapshot;
+pub use snapshot::{GridRange, Snapshot};
 
 /// Errors surfaced by the terminal core. Typed and contextual per
 /// docs/PR_REVIEW.md's error-handling expectations.

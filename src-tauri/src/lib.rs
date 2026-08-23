@@ -10,15 +10,22 @@
 
 use std::collections::HashSet;
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use sill_core::{SessionEvent, SessionId, SessionManager, SessionOptions, Snapshot};
+use sill_core::{
+    CellSide, SelectionMode, SessionEvent, SessionId, SessionManager, SessionOptions, Snapshot,
+};
 
 struct Core {
     manager: std::sync::Arc<SessionManager>,
+    /// OS clipboard handle, created lazily on first copy. Held for the
+    /// app's lifetime deliberately: under X11 the clipboard is a live
+    /// conversation — contents vanish when the owning handle drops.
+    clipboard: Mutex<Option<arboard::Clipboard>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -108,6 +115,101 @@ fn session_snapshot(state: State<'_, Core>, id: SessionId) -> Result<Snapshot, S
     state.manager.snapshot(id).map_err(|e| e.to_string())
 }
 
+/// Begin a selection at a viewport cell. Selection state lives in Rust —
+/// the frontend only reports pointer positions (issue #4 layer mandate).
+#[tauri::command]
+fn session_selection_start(
+    state: State<'_, Core>,
+    id: SessionId,
+    row: usize,
+    col: usize,
+    side: CellSide,
+    mode: SelectionMode,
+) -> Result<(), String> {
+    state
+        .manager
+        .selection_start(id, row, col, side, mode)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_selection_update(
+    state: State<'_, Core>,
+    id: SessionId,
+    row: usize,
+    col: usize,
+    side: CellSide,
+) -> Result<(), String> {
+    state
+        .manager
+        .selection_update(id, row, col, side)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_selection_clear(state: State<'_, Core>, id: SessionId) -> Result<(), String> {
+    state.manager.selection_clear(id).map_err(|e| e.to_string())
+}
+
+/// Copy the selection to the OS clipboard. Returns whether anything was
+/// copied — a strict no-op (Ok(false)) when nothing is selected. Text
+/// extraction happens in sill-core (headless-testable); only the clipboard
+/// write lives here, because the clipboard is an OS resource.
+#[tauri::command]
+fn session_copy_selection(state: State<'_, Core>, id: SessionId) -> Result<bool, String> {
+    let Some(text) = state
+        .manager
+        .selection_text(id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let mut guard = state
+        .clipboard
+        .lock()
+        .map_err(|_| "clipboard state poisoned".to_string())?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    let clipboard = guard.as_mut().expect("clipboard initialized above");
+    clipboard.set_text(text).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Start (or retype) a scrollback search. Literal + case-insensitive;
+/// returns whether a match was found (the UI shows a not-found state —
+/// v1 has no match counter by design).
+#[tauri::command]
+fn session_search_start(
+    state: State<'_, Core>,
+    id: SessionId,
+    query: String,
+) -> Result<bool, String> {
+    state
+        .manager
+        .search_start(id, &query)
+        .map_err(|e| e.to_string())
+}
+
+/// Step the focused match. `forward = false` → older (Enter),
+/// `forward = true` → newer (Shift+Enter). Wraps at buffer boundaries.
+#[tauri::command]
+fn session_search_next(
+    state: State<'_, Core>,
+    id: SessionId,
+    forward: bool,
+) -> Result<bool, String> {
+    state
+        .manager
+        .search_step(id, forward)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn session_search_close(state: State<'_, Core>, id: SessionId) -> Result<(), String> {
+    state.manager.search_clear(id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn session_kill(state: State<'_, Core>, id: SessionId) -> Result<(), String> {
     state.manager.kill(id).map_err(|e| e.to_string())
@@ -131,6 +233,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Core {
             manager: manager.clone(),
+            clipboard: Mutex::new(None),
         })
         .setup(move |app| {
             // Dirty pump: block on the first notification, then drain the
@@ -190,6 +293,13 @@ pub fn run() {
             session_scroll,
             session_scroll_to_bottom,
             session_snapshot,
+            session_selection_start,
+            session_selection_update,
+            session_selection_clear,
+            session_copy_selection,
+            session_search_start,
+            session_search_next,
+            session_search_close,
             session_kill,
             session_close,
             list_sessions,

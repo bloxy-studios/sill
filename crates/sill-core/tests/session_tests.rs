@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sill_core::{SessionEvent, SessionId, SessionManager, SessionOptions};
+use sill_core::{CellSide, SelectionMode, SessionEvent, SessionId, SessionManager, SessionOptions};
 
 const SH: &str = "/bin/sh";
 
@@ -513,6 +513,195 @@ fn close_after_shell_exit_sweeps_descendants() {
     );
     let leftover = wait_sill_threads_zero(Duration::from_secs(15));
     assert!(leftover.is_empty(), "workers pinned: {leftover:?}");
+}
+
+/// Find the viewport (row, col) where `needle` starts. The needle must be
+/// ASCII (byte index == column). Prompt placement varies by shell — dash
+/// can flush its prompt onto the same line as command output — so tests
+/// locate content instead of assuming it starts a line.
+fn find_on_screen(screen: &str, needle: &str) -> (usize, usize) {
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(r, l)| l.find(needle).map(|c| (r, c)))
+        .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{screen}"))
+}
+
+/// Selection over known PTY output must extract EXACTLY the selected
+/// cells — grid truth, not an approximation (issue #4 required test).
+/// The `%s` split keeps the assembled needle out of the echoed command
+/// line (same trick as `spawn_echo_roundtrip`).
+#[test]
+fn selection_extracts_exact_pty_output() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 24)).expect("create session");
+
+    mgr.input(id, b"printf 'sel-%s\\n' target\n").unwrap();
+    let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("sel-target")
+    });
+    let (row, col) = find_on_screen(&screen, "sel-target");
+
+    mgr.selection_start(id, row, col, CellSide::Left, SelectionMode::Simple)
+        .unwrap();
+    mgr.selection_update(id, row, col + 9, CellSide::Right)
+        .unwrap();
+    assert_eq!(
+        mgr.selection_text(id).unwrap().as_deref(),
+        Some("sel-target")
+    );
+
+    let snap = mgr.snapshot(id).unwrap();
+    let sel = snap.selection.expect("selection range in snapshot");
+    assert_eq!(
+        (
+            sel.start_row as usize,
+            sel.start_col as usize,
+            sel.end_row as usize,
+            sel.end_col as usize
+        ),
+        (row, col, row, col + 9)
+    );
+
+    mgr.close(id).unwrap();
+}
+
+/// Double-click semantics: a single semantic anchor expands to the word
+/// under it ('-' is not a semantic separator). The `%s` split keeps the
+/// assembled sentence out of the echoed command line.
+#[test]
+fn semantic_selection_selects_word_from_pty_output() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 24)).expect("create session");
+
+    mgr.input(id, b"printf 'alpha %s delta\\n' beta-gamma\n")
+        .unwrap();
+    let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("alpha beta-gamma delta")
+    });
+    let (row, col) = find_on_screen(&screen, "alpha beta-gamma delta");
+
+    // Anchor two cells into "beta-gamma".
+    mgr.selection_start(id, row, col + 8, CellSide::Left, SelectionMode::Semantic)
+        .unwrap();
+    assert_eq!(
+        mgr.selection_text(id).unwrap().as_deref(),
+        Some("beta-gamma")
+    );
+
+    mgr.close(id).unwrap();
+}
+
+/// Typing clears the selection (alacritty behavior) — synchronously, so a
+/// stale highlight can never race the next snapshot.
+#[test]
+fn selection_clears_on_user_input() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 24)).expect("create session");
+
+    mgr.input(id, b"printf 'clear-%s\\n' me\n").unwrap();
+    let screen = wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("clear-me")
+    });
+    let (row, col) = find_on_screen(&screen, "clear-me");
+
+    mgr.selection_start(id, row, col, CellSide::Left, SelectionMode::Simple)
+        .unwrap();
+    mgr.selection_update(id, row, col + 7, CellSide::Right)
+        .unwrap();
+    assert!(mgr.selection_text(id).unwrap().is_some());
+
+    mgr.input(id, b" ").unwrap();
+    assert_eq!(mgr.selection_text(id).unwrap(), None);
+    assert!(mgr.snapshot(id).unwrap().selection.is_none());
+
+    mgr.close(id).unwrap();
+}
+
+/// Searching for a line buried deep in scrollback must jump the viewport
+/// (display_offset > 0), set the focused match, and actually show the
+/// match. Stepping wraps at buffer boundaries; a miss returns cleanly.
+#[test]
+fn search_jumps_deep_into_scrollback() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 10)).expect("create session");
+
+    mgr.input(
+        id,
+        b"echo needle-alpha-mark; i=0; while [ $i -lt 100 ]; do echo fill-$i; i=$((i+1)); done\n",
+    )
+    .unwrap();
+    wait_for_screen(&mgr, id, Duration::from_secs(10), |s| s.contains("fill-99"));
+
+    assert!(mgr.search_start(id, "needle-alpha-mark").unwrap());
+    let snap = mgr.snapshot(id).unwrap();
+    assert!(snap.display_offset > 0, "viewport jumped into history");
+    assert!(snap.search_focus.is_some(), "focused match set");
+    let screen = visible_text(&mgr, id);
+    assert!(
+        screen.contains("needle-alpha-mark"),
+        "match visible after jump:\n{screen}"
+    );
+
+    // Two occurrences exist (echoed command + output). Repeated "older"
+    // steps must eventually wrap back around and stay found.
+    assert!(mgr.search_step(id, false).unwrap());
+    assert!(mgr.search_step(id, false).unwrap());
+    assert!(mgr.search_step(id, true).unwrap());
+
+    // A miss is clean: reports not-found, clears the focus, no panic.
+    assert!(!mgr.search_start(id, "zz-no-such-thing-zz").unwrap());
+    assert!(mgr.snapshot(id).unwrap().search_focus.is_none());
+
+    mgr.search_clear(id).unwrap();
+    mgr.close(id).unwrap();
+}
+
+/// Viewport↔grid mapping with a nonzero display offset: selecting a cell
+/// in the *scrolled* viewport must resolve to the line the user actually
+/// sees there (issue #4 required test).
+#[test]
+fn viewport_selection_honors_display_offset() {
+    let _serial = serial_guard();
+    let (mgr, _events, _dirty) = SessionManager::new();
+    let id = mgr.create(opts(80, 10)).expect("create session");
+
+    mgr.input(
+        id,
+        b"i=0; while [ $i -lt 100 ]; do echo mapline-$i; i=$((i+1)); done\n",
+    )
+    .unwrap();
+    wait_for_screen(&mgr, id, Duration::from_secs(10), |s| {
+        s.contains("mapline-99")
+    });
+
+    mgr.scroll(id, 7).unwrap();
+    let snap = mgr.snapshot(id).unwrap();
+    assert_eq!(snap.display_offset, 7);
+
+    // Take a concrete visible row and its content from the snapshot…
+    let screen = visible_text(&mgr, id);
+    let (row, expected) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.starts_with("mapline-"))
+        .map(|(r, l)| (r, l.to_string()))
+        .expect("a mapline row visible while scrolled");
+
+    // …semantic-select inside that viewport row: the extracted word must
+    // be exactly that line's token, proving the offset-aware mapping.
+    mgr.selection_start(id, row, 2, CellSide::Left, SelectionMode::Semantic)
+        .unwrap();
+    assert_eq!(
+        mgr.selection_text(id).unwrap().as_deref(),
+        Some(expected.as_str())
+    );
+
+    mgr.close(id).unwrap();
 }
 
 /// Hard kill() must take separately-grouped descendants with it, same as

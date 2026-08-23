@@ -5,7 +5,9 @@
 //! style runs so a typical prompt row serializes to a handful of runs
 //! rather than N cells.
 
+use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::Match;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 
@@ -59,6 +61,68 @@ pub struct Cursor {
     pub visible: bool,
 }
 
+/// A cell range in *viewport* coordinates (row 0 = top of the displayed
+/// region), end-inclusive. Ranges are pre-clamped to the viewport: a
+/// selection extending into off-screen history arrives already trimmed,
+/// so the renderer never needs grid coordinates (docs/design/ipc.md).
+///
+/// `is_block = false`: a text-stream range — `start_col` applies on the
+/// first row, `end_col` on the last, and rows between span the full width.
+/// `is_block = true`: a rectangle between the two corners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct GridRange {
+    pub start_row: u16,
+    pub start_col: u16,
+    pub end_row: u16,
+    pub end_col: u16,
+    pub is_block: bool,
+}
+
+/// Clamp an absolute grid range to the visible viewport; `None` when it is
+/// entirely off-screen. Stream ranges that continue past a viewport edge
+/// extend to that row's full width, matching what the user actually sees.
+fn viewport_range(
+    start: Point,
+    end: Point,
+    is_block: bool,
+    display_offset: usize,
+    dims: TermDims,
+) -> Option<GridRange> {
+    let offset = display_offset as i32;
+    let rows = dims.rows as i32;
+    let last_col = dims.cols.saturating_sub(1);
+
+    let mut start_row = start.line.0 + offset;
+    let mut end_row = end.line.0 + offset;
+    if end_row < 0 || start_row >= rows {
+        return None;
+    }
+
+    let mut start_col = (start.column.0 as u16).min(last_col);
+    let mut end_col = (end.column.0 as u16).min(last_col);
+    if start_row < 0 {
+        start_row = 0;
+        if !is_block {
+            start_col = 0;
+        }
+    }
+    if end_row >= rows {
+        end_row = rows - 1;
+        if !is_block {
+            end_col = last_col;
+        }
+    }
+
+    Some(GridRange {
+        start_row: start_row as u16,
+        start_col,
+        end_row: end_row as u16,
+        end_col,
+        is_block,
+    })
+}
+
 /// Full visible-viewport snapshot.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -72,6 +136,10 @@ pub struct Snapshot {
     pub history: usize,
     /// Program requested bracketed paste (frontend wraps pastes).
     pub bracketed_paste: bool,
+    /// Visible portion of the active selection, if any.
+    pub selection: Option<GridRange>,
+    /// Visible portion of the focused search match, if any.
+    pub search_focus: Option<GridRange>,
 }
 
 fn map_color(c: AnsiColor) -> Color {
@@ -146,12 +214,26 @@ fn map_flags(f: Flags) -> u16 {
 
 /// Build a snapshot of the currently displayed viewport (honors the
 /// display offset into scrollback).
-pub(crate) fn from_term(term: &Term<EventProxy>, dims: TermDims) -> Snapshot {
+pub(crate) fn from_term(
+    term: &Term<EventProxy>,
+    dims: TermDims,
+    search_focus: Option<&Match>,
+) -> Snapshot {
     use alacritty_terminal::grid::Dimensions as _;
 
     let grid = term.grid();
     let display_offset = grid.display_offset();
     let history = grid.total_lines().saturating_sub(grid.screen_lines());
+
+    let selection = term
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term))
+        .and_then(|range| {
+            viewport_range(range.start, range.end, range.is_block, display_offset, dims)
+        });
+    let search_focus = search_focus
+        .and_then(|m| viewport_range(*m.start(), *m.end(), false, display_offset, dims));
 
     let mut rows: Vec<Row> = Vec::with_capacity(dims.rows as usize);
     let mut current = Row::default();
@@ -210,5 +292,7 @@ pub(crate) fn from_term(term: &Term<EventProxy>, dims: TermDims) -> Snapshot {
         display_offset,
         history,
         bracketed_paste: term.mode().contains(TermMode::BRACKETED_PASTE),
+        selection,
+        search_focus,
     }
 }

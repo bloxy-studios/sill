@@ -27,3 +27,11 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# OS clipboard for copy-selection (clipboard = OS resource, so the write
+# lives here, not in the webview). Text-only: default-features = false
+# drops "image-data" (unused), and the opt-in "wayland-data-control"
+# feature stays off — it pulls wl-clipboard-rs (GPL-3.0), which the
+# license allowlist (deny.toml) rejects. Linux clipboard therefore goes
+# through X11 (XWayland covers most Wayland sessions); native Wayland
+# clipboard support is a tracked follow-up, not silently linked GPL code.
+arboard = { version = "3", default-features = false }

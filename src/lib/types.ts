@@ -37,6 +37,18 @@ export interface Cursor {
   visible: boolean;
 }
 
+// A cell range in viewport coordinates, end-inclusive, pre-clamped to the
+// visible grid by Rust (crates/sill-core snapshot::GridRange). Stream
+// ranges (is_block = false) span full rows between the endpoints; block
+// ranges are rectangles.
+export interface GridRange {
+  start_row: number;
+  start_col: number;
+  end_row: number;
+  end_col: number;
+  is_block: boolean;
+}
+
 export interface Snapshot {
   cols: number;
   rows: Row[];
@@ -44,7 +56,14 @@ export interface Snapshot {
   display_offset: number;
   history: number;
   bracketed_paste: boolean;
+  selection: GridRange | null;
+  search_focus: GridRange | null;
 }
+
+// Selection gestures, mirroring sill-core's SelectionMode serde form.
+export type SelectionMode = "simple" | "semantic" | "lines" | "block";
+// Which half of a cell the pointer is on (drag-direction fidelity).
+export type CellSide = "left" | "right";
 
 export type SessionEvent =
   | { kind: "created"; id: SessionId }

@@ -8,9 +8,12 @@ This roadmap is organized by phase and horizon (**NOW / NEXT / LATER /
 EXPLORING**), not by dates. Sill has no release schedule to promise yet, and
 this document will change as reality intrudes. Items are not commitments.
 
-**Current reality (2026-08):** Sill is pre-alpha. The repository contains the
-application scaffold and project infrastructure; the terminal itself is not
-yet implemented. Phase 1 is the only active phase.
+**Current reality (2026-08):** Sill is pre-alpha. The terminal foundation
+landed in #2: PTY sessions, emulation on `alacritty_terminal` (ADR-0006),
+bounded scrollback, bracketed paste, and a canvas renderer behind typed
+Tauri IPC — followed by selection with copy and scrollback search (#4).
+Phase 1 remains the active phase; splits, shell integration, and everything
+below Phase 1 is not built.
 
 ## Phase 1 — Terminal foundation — NOW
 

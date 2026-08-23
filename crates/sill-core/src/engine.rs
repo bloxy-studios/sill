@@ -7,10 +7,102 @@
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::index::{Boundary, Column, Direction, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::search::{Match, RegexSearch};
+use alacritty_terminal::term::{viewport_to_point, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 
 use crate::snapshot::{self, Snapshot};
+
+/// How a selection interprets its anchor points. Mirrors alacritty's
+/// `SelectionType` without exposing engine types across the crate boundary
+/// (same encapsulation rule as [`crate::snapshot`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum SelectionMode {
+    /// Plain drag: cell-to-cell stream selection.
+    Simple,
+    /// Double-click: expand to semantic word boundaries.
+    Semantic,
+    /// Triple-click: whole lines.
+    Lines,
+    /// Rectangular (column) selection.
+    Block,
+}
+
+impl SelectionMode {
+    fn to_engine(self) -> SelectionType {
+        match self {
+            SelectionMode::Simple => SelectionType::Simple,
+            SelectionMode::Semantic => SelectionType::Semantic,
+            SelectionMode::Lines => SelectionType::Lines,
+            SelectionMode::Block => SelectionType::Block,
+        }
+    }
+}
+
+/// Which half of a cell an anchor sits on (drag direction fidelity —
+/// selecting left-to-right vs right-to-left includes/excludes edge cells
+/// exactly like alacritty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum CellSide {
+    Left,
+    Right,
+}
+
+impl CellSide {
+    fn to_engine(self) -> Side {
+        match self {
+            CellSide::Left => Side::Left,
+            CellSide::Right => Side::Right,
+        }
+    }
+}
+
+/// Escape regex metacharacters so user input searches literally.
+/// ~15 lines instead of a regex-syntax dependency
+/// (docs/DEPENDENCY_POLICY.md: implement the required 10% ourselves).
+fn regex_escape(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 8);
+    for c in query.chars() {
+        if matches!(
+            c,
+            '\\' | '.'
+                | '+'
+                | '*'
+                | '?'
+                | '('
+                | ')'
+                | '|'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '^'
+                | '$'
+                | '#'
+                | '&'
+                | '-'
+                | '~'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Live scrollback-search state: the compiled query plus the focused match.
+/// The focus is a jump target and highlight, not a match list — v1 has no
+/// match counter by design (issue #4).
+struct ActiveSearch {
+    regex: RegexSearch,
+    focus: Option<Match>,
+}
 
 /// Viewport dimensions handed to the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +199,7 @@ pub struct TermState {
     term: Term<EventProxy>,
     parser: Processor,
     dims: TermDims,
+    search: Option<ActiveSearch>,
 }
 
 impl TermState {
@@ -124,6 +217,7 @@ impl TermState {
             term,
             parser: Processor::new(),
             dims,
+            search: None,
         }
     }
 
@@ -136,6 +230,13 @@ impl TermState {
     pub fn resize(&mut self, dims: TermDims) {
         if dims != self.dims {
             self.dims = dims;
+            // Reflow rewrites absolute grid coordinates, so a stored match
+            // range would point at the wrong cells. Drop the focus (the
+            // compiled query survives; the next step re-searches).
+            // `Term::resize` invalidates/re-anchors the selection itself.
+            if let Some(active) = self.search.as_mut() {
+                active.focus = None;
+            }
             self.term.resize(dims);
         }
     }
@@ -163,11 +264,150 @@ impl TermState {
 
     /// Render-ready snapshot of the visible viewport.
     pub fn snapshot(&self) -> Snapshot {
-        snapshot::from_term(&self.term, self.dims)
+        let focus = self.search.as_ref().and_then(|s| s.focus.as_ref());
+        snapshot::from_term(&self.term, self.dims, focus)
     }
 
     pub fn dims(&self) -> TermDims {
         self.dims
+    }
+
+    /// Convert a viewport cell (row 0 = top of the *displayed* region,
+    /// which honors scrollback offset) into an absolute grid point. Inputs
+    /// are clamped to the viewport — boundary validation lives here, not in
+    /// the frontend (docs/design/ipc.md rule 2).
+    fn viewport_point(&self, row: usize, col: usize) -> Point {
+        let row = row.min(self.dims.rows.saturating_sub(1) as usize);
+        let col = col.min(self.dims.cols.saturating_sub(1) as usize);
+        let display_offset = self.term.grid().display_offset();
+        viewport_to_point(display_offset, Point::new(row, Column(col)))
+    }
+
+    /// Begin a selection at a viewport cell. Replaces any existing
+    /// selection (a plain click therefore clears: an un-dragged Simple
+    /// selection has no extent and yields no range).
+    pub fn selection_start(&mut self, mode: SelectionMode, row: usize, col: usize, side: CellSide) {
+        let point = self.viewport_point(row, col);
+        self.term.selection = Some(Selection::new(mode.to_engine(), point, side.to_engine()));
+    }
+
+    /// Extend the active selection to a viewport cell. No-op without one.
+    pub fn selection_update(&mut self, row: usize, col: usize, side: CellSide) {
+        let point = self.viewport_point(row, col);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side.to_engine());
+        }
+    }
+
+    /// Drop the selection; reports whether one existed (callers use this to
+    /// skip redraw notifications when nothing changed).
+    pub fn selection_clear(&mut self) -> bool {
+        self.term.selection.take().is_some()
+    }
+
+    /// Extract the selected text (grid truth, headless-testable). `None`
+    /// when there is no selection or it has no extent.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+    }
+
+    /// Start (or restart) a scrollback search. The query is LITERAL — user
+    /// input is regex-escaped (regex syntax is a later, explicit opt-in) —
+    /// and always case-insensitive: the engine's smart-case default would
+    /// turn case-sensitive on any uppercase query, so `(?i)` pins it.
+    /// Searches upward (into history) from the live screen bottom; jumps
+    /// the viewport to the match. Returns whether a match was found.
+    pub fn search_start(&mut self, query: &str) -> bool {
+        self.search = None;
+        if query.is_empty() {
+            return false;
+        }
+        let pattern = format!("(?i){}", regex_escape(query));
+        let mut regex = match RegexSearch::new(&pattern) {
+            Ok(regex) => regex,
+            // Escaped literals should always compile; treat a failure as
+            // not-found rather than poisoning the session.
+            Err(_) => return false,
+        };
+        let origin = Point::new(self.term.bottommost_line(), self.term.last_column());
+        let focus = self
+            .term
+            .search_next(&mut regex, origin, Direction::Left, Side::Right, None);
+        let found = focus.is_some();
+        if let Some(m) = &focus {
+            self.jump_to_match(m);
+        }
+        self.search = Some(ActiveSearch { regex, focus });
+        found
+    }
+
+    /// Step to the adjacent match: `forward = false` → older (into
+    /// history), `forward = true` → newer. Wraps at scrollback boundaries
+    /// (the engine's `search_next` falls back to the first match, and the
+    /// one-cell origin step uses `Boundary::None`, which wraps too).
+    /// Returns whether a match is focused afterwards.
+    pub fn search_step(&mut self, forward: bool) -> bool {
+        let Some(mut active) = self.search.take() else {
+            return false;
+        };
+        let (origin, direction, side) = match (&active.focus, forward) {
+            // Next older: continue leftward from just before the focus.
+            (Some(m), false) => (
+                m.start().sub(&self.term, Boundary::None, 1),
+                Direction::Left,
+                Side::Right,
+            ),
+            // Next newer: continue rightward from just after the focus.
+            (Some(m), true) => (
+                m.end().add(&self.term, Boundary::None, 1),
+                Direction::Right,
+                Side::Left,
+            ),
+            // Nothing focused (e.g. content appeared after a miss): retry
+            // the initial upward-from-bottom search.
+            (None, _) => (
+                Point::new(self.term.bottommost_line(), self.term.last_column()),
+                Direction::Left,
+                Side::Right,
+            ),
+        };
+        let focus = self
+            .term
+            .search_next(&mut active.regex, origin, direction, side, None);
+        let found = focus.is_some();
+        if let Some(m) = &focus {
+            self.jump_to_match(m);
+        }
+        active.focus = focus;
+        self.search = Some(active);
+        found
+    }
+
+    /// End the search: drops the query and the focused-match highlight.
+    /// The viewport stays where it is. Reports whether state existed.
+    pub fn search_clear(&mut self) -> bool {
+        self.search.take().is_some()
+    }
+
+    /// Scroll the display so the match is visible. Already-visible matches
+    /// cause no movement; otherwise the match line is centered (clamped to
+    /// available history).
+    fn jump_to_match(&mut self, m: &Match) {
+        let grid = self.term.grid();
+        let display_offset = grid.display_offset() as i32;
+        let rows = self.dims.rows as i32;
+        let line = m.start().line.0;
+        let viewport_row = line + display_offset;
+        if viewport_row >= 0 && viewport_row < rows {
+            return;
+        }
+        let history = (grid.total_lines() - grid.screen_lines()) as i32;
+        let target = (rows / 2 - line).clamp(0, history);
+        self.term
+            .grid_mut()
+            .scroll_display(Scroll::Delta(target - display_offset));
     }
 
     /// True when the program enabled bracketed paste — the frontend wraps
@@ -304,5 +544,103 @@ mod tests {
         let total = s.term().grid().total_lines();
         // total = history (capped) + screen lines.
         assert!(total <= 100 + 4, "scrollback exceeded cap: {total}");
+    }
+
+    #[test]
+    fn selection_extracts_exact_text() {
+        let (mut s, _rx) = state(20, 4);
+        s.feed(b"hello world");
+        s.selection_start(SelectionMode::Simple, 0, 0, CellSide::Left);
+        s.selection_update(0, 4, CellSide::Right);
+        assert_eq!(s.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn semantic_selection_snaps_to_word() {
+        let (mut s, _rx) = state(20, 4);
+        s.feed(b"foo bar-baz qux");
+        // Single point inside "bar-baz" ('-' is not a semantic separator).
+        s.selection_start(SelectionMode::Semantic, 0, 6, CellSide::Left);
+        assert_eq!(s.selection_text().as_deref(), Some("bar-baz"));
+    }
+
+    #[test]
+    fn click_without_drag_selects_nothing() {
+        let (mut s, _rx) = state(20, 4);
+        s.feed(b"hello");
+        s.selection_start(SelectionMode::Simple, 0, 2, CellSide::Left);
+        assert_eq!(s.selection_text(), None);
+        assert!(s.snapshot().selection.is_none());
+    }
+
+    #[test]
+    fn selection_range_clamps_to_viewport() {
+        let (mut s, _rx) = state(10, 4);
+        let mut input = String::new();
+        for i in 0..20 {
+            input.push_str(&format!("l{i}\r\n"));
+        }
+        s.feed(input.as_bytes());
+        // Select the whole visible screen, then scroll 2 lines back: the
+        // selection now sticks out below the viewport and must clamp to
+        // the last visible row at full width.
+        s.selection_start(SelectionMode::Simple, 0, 0, CellSide::Left);
+        s.selection_update(3, 9, CellSide::Right);
+        s.scroll_display(2);
+        let sel = s.snapshot().selection.expect("selection visible");
+        assert_eq!((sel.start_row, sel.start_col), (2, 0));
+        assert_eq!((sel.end_row, sel.end_col), (3, 9));
+        assert!(!sel.is_block);
+    }
+
+    #[test]
+    fn search_is_literal_and_case_insensitive() {
+        let (mut s, _rx) = state(20, 4);
+        s.feed(b"A.B  axb");
+        // Searching "a.b": as a literal (case-insensitive) it matches only
+        // "A.B" at columns 0..=2. If the dot leaked through as a regex
+        // wildcard, the upward-from-bottom search would find "axb" (the
+        // rightmost candidate) first instead.
+        assert!(s.search_start("a.b"));
+        let focus = s.snapshot().search_focus.expect("focused match");
+        assert_eq!((focus.start_row, focus.start_col), (0, 0));
+        assert_eq!((focus.end_row, focus.end_col), (0, 2));
+
+        assert!(!s.search_start("q.z"));
+        assert!(s.snapshot().search_focus.is_none());
+    }
+
+    #[test]
+    fn search_jumps_into_scrollback_and_wraps() {
+        let (mut s, _rx) = state(10, 4);
+        let mut input = String::new();
+        for i in 0..30 {
+            input.push_str(&format!("line-{i}\r\n"));
+        }
+        s.feed(input.as_bytes());
+
+        assert!(s.search_start("line-3"));
+        let snap = s.snapshot();
+        assert!(snap.display_offset > 0, "viewport jumped into history");
+        assert!(snap.search_focus.is_some());
+        assert!(
+            visible_text(&s).contains("line-3"),
+            "match line visible after jump"
+        );
+
+        // Single match: stepping in either direction wraps back to it.
+        assert!(s.search_step(false));
+        assert!(s.search_step(true));
+    }
+
+    #[test]
+    fn resize_drops_search_focus() {
+        let (mut s, _rx) = state(20, 4);
+        s.feed(b"needle");
+        assert!(s.search_start("needle"));
+        assert!(s.snapshot().search_focus.is_some());
+        // Reflow invalidates absolute match coordinates.
+        s.resize(TermDims { cols: 30, rows: 6 });
+        assert!(s.snapshot().search_focus.is_none());
     }
 }
