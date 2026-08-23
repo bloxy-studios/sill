@@ -12,6 +12,16 @@ since the repository was created.
 
 ### Added
 
+- Text selection with copy: mouse drag, double-click (word), triple-click
+  (line), and Alt+drag (block) selections, rendered as canvas highlights.
+  Selection state lives in Rust; copy (Cmd+C on macOS, Ctrl+Shift+C
+  everywhere; plain Ctrl+C remains SIGINT) extracts in `sill-core` and
+  writes the OS clipboard via `arboard`. Typing or pasting clears the
+  selection.
+- Scrollback search (Cmd/Ctrl+F): literal, case-insensitive queries over
+  the full scrollback; Enter walks older matches, Shift+Enter newer, with
+  wraparound at buffer boundaries; the viewport jumps to the focused
+  match. Misses show a not-found state (no match counter yet).
 - Terminal foundation (Phase 2): `sill-core` crate — PTY sessions
   (portable-pty), terminal emulation (alacritty_terminal, chosen via
   measured spike — ADR-0006), typed session events, capped scrollback
