@@ -2,12 +2,16 @@
 // Cells, not DOM — React never re-renders per frame
 // (docs/design/performance.md).
 
-import { FLAG, type Color, type Snapshot } from "./types";
+import { FLAG, type Color, type GridRange, type Snapshot } from "./types";
 
 export interface Theme {
   background: string;
   foreground: string;
   cursor: string;
+  /** Selection highlight, painted under the text. */
+  selection: string;
+  /** Focused search-match highlight, painted under the text. */
+  searchMatch: string;
   palette: string[]; // 16 ANSI colors
 }
 
@@ -15,6 +19,8 @@ export const DEFAULT_THEME: Theme = {
   background: "#101216",
   foreground: "#d8dee9",
   cursor: "#d8dee9",
+  selection: "#2e3d5c",
+  searchMatch: "#7a5b00",
   palette: [
     "#1c1f26",
     "#e06c75",
@@ -125,6 +131,28 @@ export class GridRenderer {
     };
   }
 
+  /** Paint a viewport range (already clamped by Rust). End-inclusive. */
+  private fillRange(range: GridRange, color: string, cols: number) {
+    const { ctx, dpr } = this;
+    const cw = this.metrics.width * dpr;
+    const ch = this.metrics.height * dpr;
+    ctx.fillStyle = color;
+    if (range.is_block) {
+      ctx.fillRect(
+        range.start_col * cw,
+        range.start_row * ch,
+        (range.end_col - range.start_col + 1) * cw,
+        (range.end_row - range.start_row + 1) * ch,
+      );
+      return;
+    }
+    for (let r = range.start_row; r <= range.end_row; r++) {
+      const c0 = r === range.start_row ? range.start_col : 0;
+      const c1 = r === range.end_row ? range.end_col : cols - 1;
+      ctx.fillRect(c0 * cw, r * ch, (c1 - c0 + 1) * cw, ch);
+    }
+  }
+
   draw(snap: Snapshot, theme: Theme = DEFAULT_THEME) {
     const { ctx, dpr } = this;
     const cw = this.metrics.width * dpr;
@@ -134,24 +162,48 @@ export class GridRenderer {
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.textBaseline = "alphabetic";
 
+    // Pass 1: cell backgrounds.
+    snap.rows.forEach((row, r) => {
+      let col = 0;
+      const y = r * ch;
+      for (const run of row.runs) {
+        const wide = (run.flags & FLAG.WIDE) !== 0;
+        const runCols = [...run.text].length * (wide ? 2 : 1);
+
+        const inverse = (run.flags & FLAG.INVERSE) !== 0;
+        const bg = inverse
+          ? css(theme, run.fg, true)
+          : css(theme, run.bg, false);
+        if (bg !== theme.background) {
+          ctx.fillStyle = bg;
+          ctx.fillRect(col * cw, y, runCols * cw, ch);
+        }
+        col += runCols;
+      }
+    });
+
+    // Selection and search highlights sit above cell backgrounds but
+    // below the glyphs (issue #4: highlight before the text pass).
+    if (snap.selection) {
+      this.fillRange(snap.selection, theme.selection, snap.cols);
+    }
+    if (snap.search_focus) {
+      this.fillRange(snap.search_focus, theme.searchMatch, snap.cols);
+    }
+
+    // Pass 2: glyphs and decorations.
     snap.rows.forEach((row, r) => {
       let col = 0;
       const y = r * ch;
       for (const run of row.runs) {
         const chars = [...run.text];
         const wide = (run.flags & FLAG.WIDE) !== 0;
-        const cellSpan = wide ? 2 : 1;
-        const runCols = chars.length * cellSpan;
+        const runCols = chars.length * (wide ? 2 : 1);
 
         const inverse = (run.flags & FLAG.INVERSE) !== 0;
-        let fg = css(theme, run.fg, true);
-        let bg = css(theme, run.bg, false);
-        if (inverse) [fg, bg] = [bg, fg];
-
-        if (bg !== theme.background) {
-          ctx.fillStyle = bg;
-          ctx.fillRect(col * cw, y, runCols * cw, ch);
-        }
+        const fg = inverse
+          ? css(theme, run.bg, false)
+          : css(theme, run.fg, true);
 
         if ((run.flags & FLAG.HIDDEN) === 0 && run.text.trim().length > 0) {
           ctx.font = this.font(
