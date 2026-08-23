@@ -38,7 +38,7 @@ use std::thread;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
-use crate::engine::{EngineEvent, TermDims, TermState};
+use crate::engine::{CellSide, EngineEvent, SelectionMode, TermDims, TermState};
 use crate::shell::resolve_shell;
 use crate::snapshot::Snapshot;
 use crate::{CoreError, Result};
@@ -561,6 +561,14 @@ impl SessionManager {
     /// Write user input bytes to the session's PTY.
     pub fn input(&self, id: SessionId, bytes: &[u8]) -> Result<()> {
         let inner = self.get(id)?;
+        // Typing clears the selection (alacritty behavior). Scoped so the
+        // engine guard drops before mark_dirty — the snapshot path takes
+        // dirty_flags then engine, and holding both here in the opposite
+        // order would be an AB-BA deadlock in waiting.
+        let cleared = { inner.engine.lock().unwrap().selection_clear() };
+        if cleared {
+            self.mark_dirty(id);
+        }
         // Bounded: typing into a child that stopped reading errors after
         // ~1s instead of freezing the caller.
         inner
@@ -580,7 +588,10 @@ impl SessionManager {
         // wrapping decision and the write are atomic with respect to mode
         // changes. Lock order stays acyclic: paste takes engine→writer,
         // the reader takes engine only, the dispatcher takes writer only.
-        let engine = inner.engine.lock().unwrap();
+        let mut engine = inner.engine.lock().unwrap();
+        // Pasting clears the selection, same as typing (alacritty
+        // behavior) — under the lock this paste already holds.
+        let cleared = engine.selection_clear();
         let payload = if engine.bracketed_paste() {
             format!("\x1b[200~{normalized}\x1b[201~")
         } else {
@@ -592,6 +603,9 @@ impl SessionManager {
         // here would reintroduce).
         let result = inner.write_to_pty(payload.as_bytes(), 1000);
         drop(engine);
+        if cleared {
+            self.mark_dirty(id);
+        }
         result.map_err(|e| CoreError::Input(e.to_string()))
     }
 
@@ -626,6 +640,91 @@ impl SessionManager {
         let inner = self.get(id)?;
         inner.engine.lock().unwrap().scroll_to_bottom();
         self.mark_dirty(id);
+        Ok(())
+    }
+
+    /// Begin a selection at a viewport cell (row 0 = top of the displayed
+    /// region). The engine owns all selection state — the frontend only
+    /// ever reports where the pointer is.
+    pub fn selection_start(
+        &self,
+        id: SessionId,
+        row: usize,
+        col: usize,
+        side: CellSide,
+        mode: SelectionMode,
+    ) -> Result<()> {
+        let inner = self.get(id)?;
+        inner
+            .engine
+            .lock()
+            .unwrap()
+            .selection_start(mode, row, col, side);
+        self.mark_dirty(id);
+        Ok(())
+    }
+
+    /// Extend the active selection to a viewport cell.
+    pub fn selection_update(
+        &self,
+        id: SessionId,
+        row: usize,
+        col: usize,
+        side: CellSide,
+    ) -> Result<()> {
+        let inner = self.get(id)?;
+        inner
+            .engine
+            .lock()
+            .unwrap()
+            .selection_update(row, col, side);
+        self.mark_dirty(id);
+        Ok(())
+    }
+
+    /// Drop the active selection.
+    pub fn selection_clear(&self, id: SessionId) -> Result<()> {
+        let inner = self.get(id)?;
+        let cleared = { inner.engine.lock().unwrap().selection_clear() };
+        if cleared {
+            self.mark_dirty(id);
+        }
+        Ok(())
+    }
+
+    /// Extract the selected text. `None` when nothing is selected — copy
+    /// must be a strict no-op then, so callers get nothing to write.
+    pub fn selection_text(&self, id: SessionId) -> Result<Option<String>> {
+        let inner = self.get(id)?;
+        let text = inner.engine.lock().unwrap().selection_text();
+        Ok(text)
+    }
+
+    /// Start (or restart) a literal, case-insensitive scrollback search.
+    /// Returns whether a match was found (and focused + jumped to).
+    pub fn search_start(&self, id: SessionId, query: &str) -> Result<bool> {
+        let inner = self.get(id)?;
+        let found = { inner.engine.lock().unwrap().search_start(query) };
+        self.mark_dirty(id);
+        Ok(found)
+    }
+
+    /// Step the focused match: `forward = false` → older, `true` → newer.
+    /// Wraps at scrollback boundaries.
+    pub fn search_step(&self, id: SessionId, forward: bool) -> Result<bool> {
+        let inner = self.get(id)?;
+        let found = { inner.engine.lock().unwrap().search_step(forward) };
+        self.mark_dirty(id);
+        Ok(found)
+    }
+
+    /// End the search and drop the focused-match highlight.
+    pub fn search_clear(&self, id: SessionId) -> Result<()> {
+        let inner = self.get(id)?;
+        let cleared = { inner.engine.lock().unwrap().search_clear() };
+        if cleared {
+            self.mark_dirty(id);
+        }
         Ok(())
     }
 
